@@ -21,15 +21,17 @@ The core promise is:
 ## Milestone 1 — Editor foundation (implemented)
 
 - React + TypeScript editor shell around a direct Three.js viewport.
-- Versioned serializable project and scene entity format.
-- Starter scene with meshes, lights, camera, materials, and data-driven behaviors.
+- Versioned, validated schema-v2 project format with automatic schema-v1 behavior migration.
+- Starter scene with meshes, lights, camera, materials, world settings, and stackable gameplay components.
+- Essentials and Advanced authoring experiences over one shared project, with a persisted real-action Quick Start journey.
 - Hierarchy, picking, transform gizmos, inspector, built-in assets, and scene/game tabs.
 - Command history for create, edit, duplicate, delete, visibility, materials, and transforms.
-- Edit/play isolation, pause/step/stop, clean preview, local autosave, JSON round-trip.
-- Standalone HTML web build for primitive scenes and built-in behaviors.
+- Strict edit/play isolation, pause/fixed-step/stop, clean preview, local autosave, and validated JSON round-trip.
+- Spin, Float, and Keyboard Move components that compose in editor Play mode and the standalone HTML runtime.
+- Standalone HTML web build for primitive scenes and built-in gameplay components.
 - Responsive editor states, desktop/mobile smoke tests, and screenshot baselines.
 
-Success metric: a new user can modify the supplied scene, create an entity, change its material and transform, give it a behavior, preview it, save it, reload it, and export a runnable page.
+Success metric: a new user can follow Add → Style → Play → Build without knowing Three.js terminology, while an advanced user can stack and tune components, inspect renderer state, save/reload stable IDs, and export a runnable page.
 
 ## Milestone 2 — Asset and prefab pipeline
 
@@ -46,9 +48,9 @@ Success metric: an imported GLB survives save/reload, instantiates multiple time
 
 ## Milestone 3 — Gameplay framework
 
-- Component registry with transform, model, camera, light, collider, rigid body, audio source, and behavior definitions.
+- Extend the shipped gameplay-component foundation into a registry covering transform, model, camera, light, collider, rigid body, audio source, and custom behavior definitions.
 - Rapier physics integration with fixed timestep, sensors, collision layers, debug shapes, and restart cleanup.
-- Input Actions editor mapping keyboard, pointer, touch, and gamepad to named intents.
+- Replace the current Keyboard Move preset with an Input Actions editor mapping keyboard, pointer, touch, and gamepad to named intents.
 - Scene flow, spawn points, tags/layers, events, timers, checkpoints, and save-game data.
 - Data-driven behavior graph for common logic.
 - TypeScript behavior SDK compiled in a Worker; runtime preview hosted in a sandboxed iframe.

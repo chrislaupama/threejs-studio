@@ -2,9 +2,19 @@
 
 ## Outcome
 
-Implemented the first functional ThreeJS Game Studio editor vertical slice in a previously empty repository. The result is a React + TypeScript + Vite web application with a direct Three.js viewport, serializable project model, hierarchy, component inspector, built-in assets, command history, edit/play modes, persistence, project import/export, a standalone HTML game build, responsive layouts, diagnostics, and browser QA.
+Implemented and extended the first functional ThreeJS Game Studio editor vertical slice. The result is a React + TypeScript + Vite web application with a direct Three.js viewport, validated schema-v2 project model, progressive Essentials/Advanced authoring, stackable gameplay components, hierarchy, component inspector, built-in assets, command history, isolated edit/play modes, persistence, project import/export, a standalone HTML game build, responsive layouts, diagnostics, and browser QA.
 
 This report does not claim that the current milestone is a complete Unity/Unreal replacement or a premium AAA game. It establishes the editor/runtime architecture and the complete authoring loop needed for later asset, physics, scripting, animation, audio, UI-canvas, and packaging milestones.
+
+## Iteration 2 — Progressive authoring and schema v2
+
+- Essentials is now the default experience. It keeps Create, Objects, Details, transforms, Play, Build, plain-language Appearance/Motion controls, and a compact Quick Start card in focus.
+- Quick Start advances only after real actions in sequence: add a shape, style it, then Play. It persists dismissal/progress and ends with a working Build action.
+- Advanced reveals the denser viewport, renderer, pause/step, Scene/Game, local/global, snapping, project assets, console, IDs, and component-specific controls. Switching experience never changes project data or history.
+- Schema v2 replaces the single optional behavior with a stable `components[]` collection. Rotate, Float, and Keyboard Move can be composed on the same object.
+- Schema-v1 behavior data migrates exactly once. Imports reject future schemas and malformed nested values with paths such as `nodes[8].components[0].speed` without replacing the open project.
+- Play accepts WASD/arrow input, Pause freezes simulation, Step advances exactly `1/60`, and Stop restores authored transforms. Every mutation entry point is guarded while Play/Paused/Preview is active.
+- World controls now include background, fog enable/color/range, exposure, grid sizing, and project shadows, with simpler defaults in Essentials and full values in Advanced.
 
 ## Game design brief (editor authoring brief)
 
@@ -15,7 +25,7 @@ This report does not claim that the current milestone is a complete Unity/Unreal
 - Pressure: minimize the delay and state drift between authoring, Play mode, and export.
 - Reward/progression: each edit is visible in the viewport, reversible through history, and preserved in the project/build.
 - Fail/retry: Undo/Redo for authoring errors; Stop restores the untouched authoring document after runtime preview.
-- Skill expression: scene composition, transform/material/light/camera tuning, hierarchy organization, and behavior setup.
+- Skill expression: scene composition, transform/material/light/camera tuning, hierarchy organization, and gameplay-component setup.
 - Non-goals for this milestone: arbitrary user script execution, physics, GLB/texture/audio import, animation timelines, collaborative cloud storage, and offline binary packaging.
 
 ## Core loop
@@ -28,13 +38,13 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 
 - Start: the user lands directly in a populated `MainWorld` scene rather than a marketing or empty screen.
 - First decision: select the central Player Core or another object from the hierarchy/viewport.
-- First challenge: understand transform, material, light, camera, and behavior components without reading raw JSON.
+- First challenge: understand transform, appearance, motion, light, and camera controls without reading raw JSON.
 - First reward: the selected entity and gizmo respond immediately; the Inspector reflects the same entity.
 - Landmark: the cyan Player Core, violet Orbit Ring, raised platform, and illuminated arch make the starter composition easy to orient around.
-- Escalation: add primitives/materials, duplicate/delete, use snapping/local space, and attach a Rotator or Float behavior.
+- Escalation: add primitives/materials, duplicate/delete, make an object move, then reveal snapping/local space and stack Rotate, Float, or Keyboard Move components in Advanced.
 - Recovery: Undo/Redo and Stop return to a known state; autosave and project export protect work.
 - Completion: Preview removes editor chrome; Build downloads a standalone HTML game.
-- Tuning knobs: transforms, PBR values, light intensity/color, camera FOV/clipping, behavior type/speed/amplitude, fog, grid, shadows, and project settings.
+- Tuning knobs: transforms, PBR values, light intensity/color, camera FOV/clipping, component speed/axis/distance/phase/movement plane, fog, exposure, grid, shadows, and project settings.
 
 ## Skill-loading ledger
 
@@ -61,7 +71,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 
 ## Phase ledger
 
-- Gameplay systems: done — serializable project architecture, scene bridge, entity/component data, runtime behavior loop, shared preview/build input, and diagnostics.
+- Gameplay systems: done — serializable project architecture, scene bridge, entity/component data, composable runtime loop, shared preview/build input, and diagnostics.
 - External asset sourcing: skipped — no external art/audio asset surface or premium asset claim in this editor-foundation milestone.
 - AAA graphics: skipped — no AAA/premium game-graphics claim; the authored starter scene is a compact functional viewport fixture.
 - UI: done — studio shell, hierarchy, viewport toolbar, inspector, project browser, console, menus, command palette, status, preview, empty states, responsive drawers, and mobile review layout.
@@ -73,11 +83,12 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - `src/App.tsx`: editor orchestration, history, persistence, menus, shortcuts, panel state, Play/Stop, import/export/build.
 - `src/editor/types.ts`: serializable project/entity/component contracts.
 - `src/editor/project.ts`: starter scene, document operations, built-in assets, validation, downloads, standalone runtime builder.
-- `src/editor/ViewportEngine.ts`: Three.js lifecycle, reconciliation, picking, controls, gizmos, cameras, runtime behaviors, diagnostics, disposal.
+- `src/editor/ViewportEngine.ts`: Three.js lifecycle, reconciliation, picking, controls, gizmos, cameras, gameplay-component runtime, diagnostics, disposal.
 - `src/editor/components.tsx`: hierarchy, inspector, assets, console, form controls.
 - `src/styles.css`: complete responsive editor visual system.
-- `tests/visual.spec.ts`: core workflow and nonblank canvas smoke test.
-- `tests/visual-regression.spec.ts` plus snapshots: deterministic desktop/mobile baselines.
+- `tests/model.spec.ts`: migration, nested validation, future-schema rejection, stable presets, and component composition.
+- `tests/visual.spec.ts`: real-action Essentials journey, Play isolation, stacked components, keyboard input, pause/step/stop, persistence, and nonblank canvas smoke tests.
+- `tests/visual-regression.spec.ts` plus snapshots: deterministic Essentials and Advanced desktop/mobile baselines.
 - `README.md` and `docs/PRODUCT_PLAN.md`: usage, architecture, boundaries, and roadmap.
 - Package/build/test configuration and lockfile.
 
@@ -86,7 +97,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - Edit, Scene view, Game Camera view, Play, Pause, single-step, Stop, and clean Preview.
 - Hierarchy search, disclosure, synchronized selection, inline rename, visibility, lock.
 - Create primitive/group, duplicate, delete, Undo/Redo.
-- Transform position/rotation/scale, material color/metalness/roughness/shadows, light, camera, behavior add/remove/edit.
+- Transform position/rotation/scale, material color/metalness/roughness/shadows, light, camera, and stackable gameplay-component add/remove/edit.
 - Project browser folders/search/asset activation; console clear/filter counts.
 - Menus, command palette, local autosave, editable project import/export, standalone game build.
 - Narrow-screen first load with viewport primary, slide-over panels, 42px compact panel controls, and desktop recommendation.
@@ -94,12 +105,12 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 ## QA/release evidence
 
 - `npm run build`: pass with Vite 8.1.5 and TypeScript 6.0.3.
-- `npm test`: 4/4 pass: workflow + visual baseline on desktop Chromium and mobile WebKit.
+- `npm test`: 13 passed, 1 intentionally skipped duplicate dense-runtime case on mobile; model, workflow, and four visual baselines cover desktop Chromium and mobile WebKit.
 - Production preview URL tested: `http://127.0.0.1:4188/`.
-- Production interaction: Play → Pause → Stop restored `mode-edit`; Build downloaded `starter-project-web.html` (9,211 bytes).
+- Production interaction: Play → Escape restored `mode-edit`; Build downloaded `starter-project-web.html` (10,872 bytes).
 - Browser application errors: none. Page errors: none. Headless Chromium emitted only driver-level `ReadPixels` performance notices during screenshot/download inspection, not application warnings.
-- Desktop canvas: 724×397 CSS/drawing buffer at DPR 1; nonblank; 96 sampled color buckets; variance 255.
-- Mobile canvas: 390×556 CSS, 780×1112 drawing buffer at DPR 2; nonblank; 133 sampled color buckets; variance 255.
+- Desktop Essentials canvas: 724×615 CSS/drawing buffer at DPR 1; nonblank; 119 sampled color buckets; variance 255.
+- Mobile Essentials canvas: 390×556 CSS, 780×1112 drawing buffer at DPR 2; nonblank; 140 sampled color buckets; variance 255.
 - Renderer diagnostics on both: 24 calls, 3,042 triangles, 25 geometries, 3 textures.
 - Render budget: within desktop limits (300 calls / 750k triangles / 300 geometries / 60 textures) and mobile limits (150 / 300k / 200 / 40).
 - Desktop inspection: `/private/tmp/threejs-studio-inspection/desktop.png` and `.json`.
@@ -109,11 +120,11 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 ## Visual test harness
 
 - Decision: added because the editor is UI-heavy and desktop/mobile panel fit is a high-regression surface.
-- States: initial authoring editor on desktop Chrome and mobile Safari/WebKit profile.
-- Determinism: runtime behaviors do not advance in Edit mode; transitions/animations and dynamic toast/FPS/autosave overlays are hidden for baseline capture.
+- States: Essentials and Advanced authoring editor on desktop Chrome and mobile Safari/WebKit profiles.
+- Determinism: gameplay components do not advance in Edit mode; transitions/animations and dynamic toast/FPS/autosave overlays are hidden for baseline capture.
 - Update command: `npm test -- --update-snapshots=all`.
 - Compare command: `npm test`.
-- Baselines: `tests/visual-regression.spec.ts-snapshots/studio-editor-desktop-chrome-desktop-chrome-darwin.png` and `studio-editor-mobile-safari-mobile-safari-darwin.png`.
+- Baselines: `tests/visual-regression.spec.ts-snapshots/studio-{essentials,advanced}-{desktop-chrome,mobile-safari}-*.png`.
 - Threshold: `maxDiffPixelRatio: 0.012`; no masks.
 - Flake risk: minor WebGL antialiasing differences across operating systems/GPU drivers; smoke tests separately sample canvas pixels and interactions.
 
@@ -124,7 +135,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - DPR capped at 2; current mobile profile renders at 2×.
 - Scene nodes are reconciled in place; structural changes create/dispose objects while inspector edits update existing resources.
 - Geometry/material/control/listener/renderer disposal is implemented.
-- Current bundle: approximately 847 KB JS / 226 KB gzip and 39 KB CSS / 8.7 KB gzip. Three.js is the dominant runtime dependency; route/code splitting is a later deployment optimization.
+- Current bundle: approximately 873 KB JS / 233 KB gzip and 47 KB CSS / 10 KB gzip. Three.js is the dominant runtime dependency; route/code splitting is a later deployment optimization.
 
 ## Remaining risks and planned work
 

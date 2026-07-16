@@ -13,9 +13,9 @@ import {
   Folder,
   Grid3X3,
   Info,
+  Keyboard,
   Lightbulb,
   LockKeyhole,
-  MoreHorizontal,
   Package,
   Palette,
   Plus,
@@ -24,16 +24,22 @@ import {
   Trash2,
   Triangle,
   UnlockKeyhole,
+  Waves,
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { createGameplayComponent } from './project';
 import type {
   ConsoleEntry,
+  GameplayComponent,
   PrimitiveType,
   ProjectDocument,
+  ProjectSettings,
   SceneNode,
   StudioAsset,
 } from './types';
+
+type ExperienceLevel = 'essentials' | 'advanced';
 
 const iconSize = 14;
 
@@ -87,6 +93,7 @@ function NodeGlyph({ node }: { node: SceneNode }) {
 
 interface HierarchyProps {
   project: ProjectDocument;
+  experience: ExperienceLevel;
   selectedId: string | null;
   disabled: boolean;
   onSelect: (id: string) => void;
@@ -96,7 +103,7 @@ interface HierarchyProps {
   onAdd: () => void;
 }
 
-interface TreeRowProps extends Omit<HierarchyProps, 'project' | 'onAdd'> {
+interface TreeRowProps extends Omit<HierarchyProps, 'project' | 'onAdd' | 'experience'> {
   node: SceneNode;
   depth: number;
   childrenByParent: Map<string | null, SceneNode[]>;
@@ -181,6 +188,7 @@ function TreeRow({
             type="button"
             className="tree-mini-action"
             aria-label={node.visible ? `Hide ${node.name}` : `Show ${node.name}`}
+            disabled={disabled}
             onClick={(event) => {
               event.stopPropagation();
               onToggleVisible(node.id);
@@ -192,6 +200,7 @@ function TreeRow({
             type="button"
             className="tree-mini-action"
             aria-label={node.locked ? `Unlock ${node.name}` : `Lock ${node.name}`}
+            disabled={disabled}
             onClick={(event) => {
               event.stopPropagation();
               onToggleLock(node.id);
@@ -223,6 +232,7 @@ function TreeRow({
 
 export function HierarchyPanel({
   project,
+  experience,
   selectedId,
   disabled,
   onSelect,
@@ -261,11 +271,10 @@ export function HierarchyPanel({
       <div className="dock-header">
         <div>
           <span className="dock-eyebrow">Scene</span>
-          <strong>Hierarchy</strong>
+          <strong>{experience === 'essentials' ? 'Objects' : 'Hierarchy'}</strong>
         </div>
         <div className="dock-header-actions">
           <IconButton label="Add object" compact onClick={onAdd} disabled={disabled}><Plus size={14} /></IconButton>
-          <IconButton label="Hierarchy options" compact><MoreHorizontal size={14} /></IconButton>
         </div>
       </div>
       <label className="panel-search">
@@ -388,7 +397,9 @@ interface InspectorProps {
   node: SceneNode | undefined;
   disabled: boolean;
   project: ProjectDocument;
+  experience: ExperienceLevel;
   onUpdate: (node: SceneNode, label: string) => void;
+  onUpdateSettings: (settings: ProjectSettings, label: string) => void;
   onDelete: () => void;
 }
 
@@ -397,18 +408,65 @@ function ComponentHeading({ icon, title, onRemove }: { icon: ReactNode; title: s
     <div className="component-heading">
       <span>{icon}</span>
       <strong>{title}</strong>
-      <button type="button" aria-label={`${title} options`}><MoreHorizontal size={13} /></button>
       {onRemove ? <button type="button" aria-label={`Remove ${title}`} onClick={onRemove}><Trash2 size={12} /></button> : null}
     </div>
   );
 }
 
-export function InspectorPanel({ node, disabled, project, onUpdate, onDelete }: InspectorProps) {
+const componentCopy: Record<GameplayComponent['type'], { essential: string; advanced: string; description: string }> = {
+  rotate: { essential: 'Spin', advanced: 'Rotate Component', description: 'Spin continuously while the game is playing.' },
+  float: { essential: 'Float', advanced: 'Float Component', description: 'Gently bob along one axis while playing.' },
+  keyboardMove: { essential: 'Move with Keyboard', advanced: 'Keyboard Move Component', description: 'Control this object with WASD or the arrow keys.' },
+};
+
+function GameplayComponentEditor({
+  component,
+  experience,
+  disabled,
+  onChange,
+  onRemove,
+}: {
+  component: GameplayComponent;
+  experience: ExperienceLevel;
+  disabled: boolean;
+  onChange: (component: GameplayComponent, label: string) => void;
+  onRemove: () => void;
+}) {
+  const copy = componentCopy[component.type];
+  const icon = component.type === 'keyboardMove' ? <Keyboard size={14} /> : component.type === 'float' ? <Waves size={14} /> : <FileBox size={14} />;
+  const advancedFields = (
+    <div className="component-advanced-grid">
+      {component.type === 'rotate' || component.type === 'float' ? (
+        <label className="property-row"><span className="property-label">Axis</span><select value={component.axis} disabled={disabled} onChange={(event) => onChange({ ...component, axis: event.target.value as 'x' | 'y' | 'z' }, 'Change motion axis')}><option value="x">X axis</option><option value="y">Y axis</option><option value="z">Z axis</option></select></label>
+      ) : null}
+      {component.type === 'float' ? <label className="property-row"><span className="property-label">Distance</span><NumberField label="m" value={component.distance} disabled={disabled} onCommit={(value) => onChange({ ...component, distance: Math.max(0, value) }, 'Change float distance')} /></label> : null}
+      {component.type === 'float' ? <label className="property-row"><span className="property-label">Phase</span><NumberField label="°" value={component.phase * 180 / Math.PI} disabled={disabled} onCommit={(value) => onChange({ ...component, phase: value * Math.PI / 180 }, 'Change float phase')} /></label> : null}
+      {component.type === 'keyboardMove' ? <label className="property-row"><span className="property-label">Movement plane</span><select value={component.plane} disabled={disabled} onChange={(event) => onChange({ ...component, plane: event.target.value as 'xz' | 'xy' }, 'Change movement plane')}><option value="xz">Ground (X / Z)</option><option value="xy">Screen (X / Y)</option></select></label> : null}
+      <div className="component-id"><span>Component ID</span><code>{component.id}</code></div>
+    </div>
+  );
+
+  return (
+    <details className="component gameplay-component" open data-component-id={component.id}>
+      <summary><ComponentHeading icon={icon} title={experience === 'essentials' ? copy.essential : copy.advanced} onRemove={disabled ? undefined : onRemove} /></summary>
+      <div className="component-body property-stack">
+        <p className="component-description">{copy.description}</p>
+        <label className="property-row checkbox-row"><span className="property-label">Active</span><label><input type="checkbox" checked={component.enabled} disabled={disabled} onChange={(event) => onChange({ ...component, enabled: event.target.checked }, 'Toggle gameplay component')} /> Run in Play mode</label></label>
+        <label className="property-row"><span className="property-label">Speed</span><NumberField label="×" value={component.speed} step={0.1} disabled={disabled} onCommit={(value) => onChange({ ...component, speed: Math.max(0, value) }, 'Change component speed')} /></label>
+        {experience === 'advanced' ? advancedFields : (
+          <details className="advanced-settings" data-testid="advanced-settings-toggle"><summary>Advanced settings</summary>{advancedFields}</details>
+        )}
+      </div>
+    </details>
+  );
+}
+
+export function InspectorPanel({ node, disabled, project, experience, onUpdate, onUpdateSettings, onDelete }: InspectorProps) {
   const [componentMenuOpen, setComponentMenuOpen] = useState(false);
   if (!node) {
     return (
       <aside className="dock inspector-panel" aria-label="Inspector" data-testid="inspector-panel">
-        <div className="dock-header"><div><span className="dock-eyebrow">Properties</span><strong>Inspector</strong></div></div>
+        <div className="dock-header"><div><span className="dock-eyebrow">Properties</span><strong>{experience === 'essentials' ? 'Details' : 'Inspector'}</strong></div></div>
         <div className="inspector-empty">
           <div className="empty-orbit"><Circle size={30} /><span /></div>
           <strong>Nothing selected</strong>
@@ -422,14 +480,33 @@ export function InspectorPanel({ node, disabled, project, onUpdate, onDelete }: 
     onUpdate({ ...node, transform: { ...node.transform, [key]: value } }, `Change ${key}`);
   };
 
+  const renderMaterialTechnicalFields = () => node.material ? (
+    <div className="component-advanced-grid">
+      <label className="property-row range-property">
+        <span className="property-label">Metallic</span>
+        <input type="range" min="0" max="1" step="0.01" value={node.material.metalness} disabled={disabled} onChange={(event) => onUpdate({ ...node, material: { ...node.material!, metalness: Number(event.target.value) } }, 'Change metallic')} />
+        <code>{node.material.metalness.toFixed(2)}</code>
+      </label>
+      <label className="property-row range-property">
+        <span className="property-label">Roughness</span>
+        <input type="range" min="0" max="1" step="0.01" value={node.material.roughness} disabled={disabled} onChange={(event) => onUpdate({ ...node, material: { ...node.material!, roughness: Number(event.target.value) } }, 'Change roughness')} />
+        <code>{node.material.roughness.toFixed(2)}</code>
+      </label>
+      <div className="property-row checkbox-row">
+        <span className="property-label">Lighting</span>
+        <label><input type="checkbox" checked={Boolean(node.castShadow)} disabled={disabled} onChange={(event) => onUpdate({ ...node, castShadow: event.target.checked }, 'Toggle cast shadows')} /> Cast shadows</label>
+        <label><input type="checkbox" checked={Boolean(node.receiveShadow)} disabled={disabled} onChange={(event) => onUpdate({ ...node, receiveShadow: event.target.checked }, 'Toggle receive shadows')} /> Receive</label>
+      </div>
+    </div>
+  ) : null;
+
   return (
     <aside className="dock inspector-panel" aria-label="Inspector" data-testid="inspector-panel">
       <div className="dock-header inspector-titlebar">
-        <div>
-          <span className="dock-eyebrow">Properties</span>
-          <strong>Inspector</strong>
-        </div>
-        <IconButton label="Inspector options" compact><MoreHorizontal size={14} /></IconButton>
+          <div>
+            <span className="dock-eyebrow">Properties</span>
+          <strong>{experience === 'essentials' ? 'Details' : 'Inspector'}</strong>
+          </div>
       </div>
       <div className="inspector-scroll">
         <div className="object-header">
@@ -450,29 +527,52 @@ export function InspectorPanel({ node, disabled, project, onUpdate, onDelete }: 
             onChange={(event) => onUpdate({ ...node, name: event.target.value }, 'Rename object')}
             data-testid="inspector-name"
           />
-          <IconButton label="More object options" compact><MoreHorizontal size={14} /></IconButton>
-        </div>
-        <div className="object-meta-row">
-          <label><span>Tag</span><select disabled={disabled}><option>Untagged</option><option>Player</option><option>Environment</option></select></label>
-          <label><span>Layer</span><select disabled={disabled}><option>Default</option><option>UI</option><option>Ignore Raycast</option></select></label>
         </div>
 
-        <details className="component" open>
+        {node.id !== 'scene-root' ? <details className="component" open>
           <summary><ComponentHeading icon={<Box size={14} />} title="Transform" /></summary>
           <div className="component-body">
             <VectorEditor label="Position" values={node.transform.position} disabled={disabled || node.locked} onChange={(value) => updateTransform('position', value)} />
             <VectorEditor label="Rotation" values={node.transform.rotation} degrees disabled={disabled || node.locked} onChange={(value) => updateTransform('rotation', value)} />
             <VectorEditor label="Scale" values={node.transform.scale} disabled={disabled || node.locked} onChange={(value) => updateTransform('scale', value)} />
+            {experience === 'essentials' ? <button type="button" className="reset-transform" disabled={disabled || node.locked} onClick={() => onUpdate({ ...node, transform: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } }, 'Reset transform')}>Reset transform</button> : null}
           </div>
-        </details>
+        </details> : null}
+
+        {node.id === 'scene-root' ? (
+          <details className="component world-settings" open>
+            <summary><ComponentHeading icon={<Grid3X3 size={14} />} title={experience === 'essentials' ? 'World' : 'Scene Environment'} /></summary>
+            <div className="component-body property-stack">
+              <p className="component-description">Set the atmosphere shared by the editor, Play mode, and your web build.</p>
+              <label className="property-row color-property"><span className="property-label">Background</span><span className="color-control"><input type="color" value={project.settings.background} disabled={disabled} onChange={(event) => onUpdateSettings({ ...project.settings, background: event.target.value }, 'Change world background')} /><code>{project.settings.background.toUpperCase()}</code></span></label>
+              <label className="property-row checkbox-row"><span className="property-label">Atmosphere</span><label><input type="checkbox" checked={project.settings.fogEnabled} disabled={disabled} onChange={(event) => onUpdateSettings({ ...project.settings, fogEnabled: event.target.checked }, 'Toggle world fog')} /> Depth fog</label></label>
+              {experience === 'advanced' ? (
+                <div className="component-advanced-grid">
+                  <label className="property-row color-property"><span className="property-label">Fog color</span><span className="color-control"><input type="color" value={project.settings.fogColor} disabled={disabled} onChange={(event) => onUpdateSettings({ ...project.settings, fogColor: event.target.value }, 'Change fog color')} /><code>{project.settings.fogColor.toUpperCase()}</code></span></label>
+                  <label className="property-row"><span className="property-label">Fog start</span><NumberField label="m" value={project.settings.fogNear} disabled={disabled} onCommit={(value) => onUpdateSettings({ ...project.settings, fogNear: Math.max(0, Math.min(value, project.settings.fogFar - 0.1)) }, 'Change fog start')} /></label>
+                  <label className="property-row"><span className="property-label">Fog end</span><NumberField label="m" value={project.settings.fogFar} disabled={disabled} onCommit={(value) => onUpdateSettings({ ...project.settings, fogFar: Math.max(project.settings.fogNear + 0.1, value) }, 'Change fog end')} /></label>
+                  <label className="property-row"><span className="property-label">Exposure</span><NumberField label="×" value={project.settings.exposure} disabled={disabled} onCommit={(value) => onUpdateSettings({ ...project.settings, exposure: Math.min(4, Math.max(0.1, value)) }, 'Change exposure')} /></label>
+                  <label className="property-row"><span className="property-label">Grid size</span><NumberField label="m" value={project.settings.gridSize} step={1} disabled={disabled} onCommit={(value) => onUpdateSettings({ ...project.settings, gridSize: Math.max(1, value) }, 'Change grid size')} /></label>
+                  <label className="property-row"><span className="property-label">Grid divisions</span><NumberField label="" value={project.settings.gridDivisions} step={1} disabled={disabled} onCommit={(value) => onUpdateSettings({ ...project.settings, gridDivisions: Math.max(1, Math.round(value)) }, 'Change grid divisions')} /></label>
+                  <label className="property-row checkbox-row"><span className="property-label">Rendering</span><label><input type="checkbox" checked={project.settings.shadows} disabled={disabled} onChange={(event) => onUpdateSettings({ ...project.settings, shadows: event.target.checked }, 'Toggle project shadows')} /> Realtime shadows</label></label>
+                </div>
+              ) : (
+                <details className="advanced-settings" data-testid="advanced-settings-toggle"><summary>Advanced world settings</summary><div className="component-advanced-grid">
+                  <label className="property-row color-property"><span className="property-label">Fog color</span><span className="color-control"><input type="color" value={project.settings.fogColor} disabled={disabled} onChange={(event) => onUpdateSettings({ ...project.settings, fogColor: event.target.value }, 'Change fog color')} /><code>{project.settings.fogColor.toUpperCase()}</code></span></label>
+                  <label className="property-row"><span className="property-label">Exposure</span><NumberField label="×" value={project.settings.exposure} disabled={disabled} onCommit={(value) => onUpdateSettings({ ...project.settings, exposure: Math.min(4, Math.max(0.1, value)) }, 'Change exposure')} /></label>
+                </div></details>
+              )}
+            </div>
+          </details>
+        ) : null}
 
         {node.kind === 'mesh' && node.material ? (
           <details className="component" open>
-            <summary><ComponentHeading icon={<Palette size={14} />} title="Mesh Renderer" /></summary>
+            <summary><ComponentHeading icon={<Palette size={14} />} title={experience === 'essentials' ? 'Appearance' : 'Mesh Renderer'} /></summary>
             <div className="component-body property-stack">
               <div className="material-preview-row">
                 <span className="property-label">Material</span>
-                <div className="material-slot"><span style={{ background: node.material.color }} /><strong>Standard PBR</strong><MoreHorizontal size={13} /></div>
+                <div className="material-slot"><span style={{ background: node.material.color }} /><strong>{experience === 'essentials' ? 'Standard material' : 'Standard PBR'}</strong></div>
               </div>
               <label className="property-row color-property">
                 <span className="property-label">Base color</span>
@@ -486,21 +586,7 @@ export function InspectorPanel({ node, disabled, project, onUpdate, onDelete }: 
                   <code>{node.material.color.toUpperCase()}</code>
                 </span>
               </label>
-              <label className="property-row range-property">
-                <span className="property-label">Metallic</span>
-                <input type="range" min="0" max="1" step="0.01" value={node.material.metalness} disabled={disabled} onChange={(event) => onUpdate({ ...node, material: { ...node.material!, metalness: Number(event.target.value) } }, 'Change metallic')} />
-                <code>{node.material.metalness.toFixed(2)}</code>
-              </label>
-              <label className="property-row range-property">
-                <span className="property-label">Roughness</span>
-                <input type="range" min="0" max="1" step="0.01" value={node.material.roughness} disabled={disabled} onChange={(event) => onUpdate({ ...node, material: { ...node.material!, roughness: Number(event.target.value) } }, 'Change roughness')} />
-                <code>{node.material.roughness.toFixed(2)}</code>
-              </label>
-              <div className="property-row checkbox-row">
-                <span className="property-label">Lighting</span>
-                <label><input type="checkbox" checked={Boolean(node.castShadow)} disabled={disabled} onChange={(event) => onUpdate({ ...node, castShadow: event.target.checked }, 'Toggle cast shadows')} /> Cast shadows</label>
-                <label><input type="checkbox" checked={Boolean(node.receiveShadow)} disabled={disabled} onChange={(event) => onUpdate({ ...node, receiveShadow: event.target.checked }, 'Toggle receive shadows')} /> Receive</label>
-              </div>
+              {experience === 'advanced' ? renderMaterialTechnicalFields() : <details className="advanced-settings" data-testid="advanced-settings-toggle"><summary>Advanced material settings</summary>{renderMaterialTechnicalFields()}</details>}
             </div>
           </details>
         ) : null}
@@ -529,32 +615,33 @@ export function InspectorPanel({ node, disabled, project, onUpdate, onDelete }: 
           </details>
         ) : null}
 
-        {node.behavior ? (
-          <details className="component" open>
-            <summary><ComponentHeading icon={<FileBox size={14} />} title={node.behavior.type === 'rotate' ? 'Rotator Behavior' : 'Float Behavior'} onRemove={() => onUpdate({ ...node, behavior: undefined }, 'Remove behavior')} /></summary>
-            <div className="component-body property-stack">
-              <label className="property-row checkbox-row"><span className="property-label">Enabled</span><label><input type="checkbox" checked={node.behavior.enabled} disabled={disabled} onChange={(event) => onUpdate({ ...node, behavior: { ...node.behavior!, enabled: event.target.checked } }, 'Toggle behavior')} /> Run in play mode</label></label>
-              <label className="property-row"><span className="property-label">Speed</span><NumberField label="x" value={node.behavior.speed} disabled={disabled} onCommit={(value) => onUpdate({ ...node, behavior: { ...node.behavior!, speed: value } }, 'Change behavior speed')} /></label>
-              {node.behavior.type === 'float' ? <label className="property-row"><span className="property-label">Amplitude</span><NumberField label="m" value={node.behavior.amplitude} disabled={disabled} onCommit={(value) => onUpdate({ ...node, behavior: { ...node.behavior!, amplitude: Math.max(0, value) } }, 'Change float amplitude')} /></label> : null}
-            </div>
-          </details>
-        ) : null}
+        {node.components.map((component) => (
+          <GameplayComponentEditor
+            key={component.id}
+            component={component}
+            experience={experience}
+            disabled={disabled}
+            onChange={(nextComponent, label) => onUpdate({ ...node, components: node.components.map((entry) => entry.id === component.id ? nextComponent : entry) }, label)}
+            onRemove={() => onUpdate({ ...node, components: node.components.filter((entry) => entry.id !== component.id) }, `Remove ${componentCopy[component.type].essential} component`)}
+          />
+        ))}
 
-        {node.kind === 'mesh' && !node.behavior ? (
+        {node.id !== 'scene-root' ? (
           <div className="add-component-wrap">
-            <button type="button" className="add-component-button" disabled={disabled} onClick={() => setComponentMenuOpen((open) => !open)}><Plus size={14} /> Add Component</button>
+            <button type="button" className="add-component-button" disabled={disabled} data-testid="make-it-move" onClick={() => setComponentMenuOpen((open) => !open)}><Plus size={14} /> {experience === 'essentials' ? 'Make it move' : 'Add Component'}</button>
             {componentMenuOpen ? (
               <div className="component-menu">
-                <span>Add behavior</span>
-                <button type="button" onClick={() => { onUpdate({ ...node, behavior: { type: 'rotate', enabled: true, speed: 1, amplitude: 0 } }, 'Add rotator behavior'); setComponentMenuOpen(false); }}><FileBox size={14} /><span><strong>Rotator</strong><small>Rotate while the game is playing</small></span></button>
-                <button type="button" onClick={() => { onUpdate({ ...node, behavior: { type: 'float', enabled: true, speed: 1, amplitude: 0.2 } }, 'Add float behavior'); setComponentMenuOpen(false); }}><FileBox size={14} /><span><strong>Float</strong><small>Animate along the vertical axis</small></span></button>
+                <span>{experience === 'essentials' ? 'Choose motion' : 'Gameplay components'}</span>
+                <button type="button" onClick={() => { onUpdate({ ...node, components: [...node.components, createGameplayComponent('keyboardMove')] }, 'Add Keyboard Move component'); setComponentMenuOpen(false); }}><Keyboard size={14} /><span><strong>Move with Keyboard</strong><small>Control with WASD or arrow keys</small></span></button>
+                <button type="button" onClick={() => { onUpdate({ ...node, components: [...node.components, createGameplayComponent('rotate')] }, 'Add Rotate component'); setComponentMenuOpen(false); }}><FileBox size={14} /><span><strong>Spin</strong><small>Rotate continuously in Play mode</small></span></button>
+                <button type="button" onClick={() => { onUpdate({ ...node, components: [...node.components, createGameplayComponent('float')] }, 'Add Float component'); setComponentMenuOpen(false); }}><Waves size={14} /><span><strong>Float</strong><small>Gently bob along an axis</small></span></button>
               </div>
             ) : null}
           </div>
         ) : null}
 
         {node.id !== 'scene-root' ? <button type="button" className="inspector-delete" disabled={disabled} onClick={onDelete}><Trash2 size={13} /> Remove object</button> : null}
-        <div className="inspector-path">{project.sceneName} / {node.name}<code>{node.id}</code></div>
+        {experience === 'advanced' ? <div className="inspector-path">{project.sceneName} / {node.name}<code>{node.id}</code></div> : null}
       </div>
     </aside>
   );
@@ -583,6 +670,7 @@ function AssetGrid({ assets, selectedNode, onActivate }: AssetGridProps) {
   const visible = assets.filter((asset) =>
     (category === 'all' || asset.kind === category) && asset.name.toLowerCase().includes(query.toLowerCase()),
   );
+  const activeAsset = assets.find((asset) => asset.id === selectedAsset);
 
   return (
     <div className="assets-layout">
@@ -616,6 +704,7 @@ function AssetGrid({ assets, selectedNode, onActivate }: AssetGridProps) {
           ))}
           {visible.length === 0 ? <div className="asset-empty"><Search size={20} /><strong>No matching assets</strong><span>Try a different name or folder.</span></div> : null}
         </div>
+        {activeAsset ? <div className="asset-action-bar"><span><strong>{activeAsset.name}</strong><small>{activeAsset.meta}</small></span><button type="button" onClick={() => onActivate(activeAsset)}>{activeAsset.kind === 'material' ? 'Apply to selected' : activeAsset.kind === 'primitive' ? 'Add to scene' : 'Open scene'}</button></div> : null}
       </div>
     </div>
   );

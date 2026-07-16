@@ -4,6 +4,7 @@ import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import type {
   EditorMode,
   EditorTool,
+  GameplayComponent,
   PrimitiveType,
   ProjectDocument,
   RendererStats,
@@ -20,6 +21,7 @@ interface ViewportCallbacks {
 }
 
 const editorOnlyKey = 'studioEditorOnly';
+const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
 
 function geometryFor(primitive: PrimitiveType): THREE.BufferGeometry {
   switch (primitive) {
@@ -88,7 +90,9 @@ export class ViewportEngine {
   private disposed = false;
   private pointerDownAt = { x: 0, y: 0 };
   private runtimeTime = 0;
+  private runtimeTick = 0;
   private stepRequested = false;
+  private readonly keys = new Set<string>();
   private frames = 0;
   private totalFrames = 0;
   private statsElapsed = 0;
@@ -167,6 +171,9 @@ export class ViewportEngine {
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
     this.canvas.addEventListener('pointerup', this.onPointerUp);
     this.canvas.addEventListener('dblclick', this.onDoubleClick);
+    window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('blur', this.onWindowBlur);
     this.resizeObserver = new ResizeObserver(this.resize);
     this.resizeObserver.observe(canvas.parentElement ?? canvas);
     this.resize();
@@ -217,6 +224,22 @@ export class ViewportEngine {
 
   private readonly onDoubleClick = () => {
     if (this.selectedId) this.frameSelection();
+  };
+
+  private readonly onKeyDown = (event: KeyboardEvent) => {
+    if (this.mode !== 'play') return;
+    const key = event.key.toLowerCase();
+    if (!movementKeys.has(key)) return;
+    this.keys.add(key);
+    event.preventDefault();
+  };
+
+  private readonly onKeyUp = (event: KeyboardEvent) => {
+    this.keys.delete(event.key.toLowerCase());
+  };
+
+  private readonly onWindowBlur = () => {
+    this.keys.clear();
   };
 
   private pick(event: PointerEvent) {
@@ -323,7 +346,9 @@ export class ViewportEngine {
     root.scale.fromArray(node.transform.scale);
     root.userData.basePosition = [...node.transform.position];
     root.userData.baseRotation = [...node.transform.rotation];
-    root.userData.behavior = node.behavior ? structuredClone(node.behavior) : undefined;
+    root.userData.baseScale = [...node.transform.scale];
+    root.userData.runtimeOffset = [0, 0, 0];
+    root.userData.components = structuredClone(node.components);
 
     root.traverse((child) => {
       if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
@@ -360,7 +385,10 @@ export class ViewportEngine {
   setDocument(project: ProjectDocument) {
     this.document = project;
     this.scene.background = new THREE.Color(project.settings.background);
-    this.scene.fog = new THREE.Fog(project.settings.fogColor, project.settings.fogNear, project.settings.fogFar);
+    this.scene.fog = project.settings.fogEnabled
+      ? new THREE.Fog(project.settings.fogColor, project.settings.fogNear, project.settings.fogFar)
+      : null;
+    this.renderer.toneMappingExposure = project.settings.exposure;
     this.renderer.shadowMap.enabled = project.settings.shadows;
 
     if (
@@ -443,11 +471,19 @@ export class ViewportEngine {
   }
 
   setMode(mode: EditorMode) {
+    const previousMode = this.mode;
     this.mode = mode;
     if (mode === 'edit') {
       this.runtimeTime = 0;
+      this.runtimeTick = 0;
+      if (this.document) this.setDocument(this.document);
+    } else if (mode === 'play' && previousMode === 'edit') {
+      this.runtimeTime = 0;
+      this.runtimeTick = 0;
       if (this.document) this.setDocument(this.document);
     }
+    if (mode !== 'play') this.keys.clear();
+    this.stepRequested = false;
     this.updateEditorVisibility();
     this.syncSelection();
   }
@@ -470,7 +506,7 @@ export class ViewportEngine {
   }
 
   step() {
-    this.stepRequested = true;
+    if (this.mode === 'paused') this.stepRequested = true;
   }
 
   frameSelection() {
@@ -516,18 +552,52 @@ export class ViewportEngine {
 
   private updateRuntime(delta: number) {
     if (this.mode === 'edit') return;
-    if (this.mode === 'paused' && !this.stepRequested) return;
+    let simulationDelta = delta;
+    if (this.mode === 'paused') {
+      if (!this.stepRequested) return;
+      simulationDelta = 1 / 60;
+    }
     this.stepRequested = false;
-    this.runtimeTime += delta;
+    this.runtimeTime += simulationDelta;
+    this.runtimeTick += 1;
     for (const root of this.objects.values()) {
-      const behavior = root.userData.behavior as SceneNode['behavior'];
+      const components = root.userData.components as GameplayComponent[] | undefined;
       const basePosition = root.userData.basePosition as TransformData['position'];
       const baseRotation = root.userData.baseRotation as TransformData['rotation'];
-      if (!behavior?.enabled || !basePosition || !baseRotation) continue;
-      if (behavior.type === 'rotate') {
-        root.rotation.y = baseRotation[1] + this.runtimeTime * behavior.speed;
-      } else {
-        root.position.y = basePosition[1] + Math.sin(this.runtimeTime * behavior.speed * 2) * behavior.amplitude;
+      const baseScale = root.userData.baseScale as TransformData['scale'];
+      const runtimeOffset = root.userData.runtimeOffset as TransformData['position'];
+      if (!components || !basePosition || !baseRotation || !baseScale || !runtimeOffset) continue;
+
+      for (const component of components) {
+        if (!component.enabled || component.type !== 'keyboardMove') continue;
+        let horizontal = (this.keys.has('d') || this.keys.has('arrowright') ? 1 : 0) -
+          (this.keys.has('a') || this.keys.has('arrowleft') ? 1 : 0);
+        let vertical = (this.keys.has('w') || this.keys.has('arrowup') ? 1 : 0) -
+          (this.keys.has('s') || this.keys.has('arrowdown') ? 1 : 0);
+        const length = Math.hypot(horizontal, vertical) || 1;
+        horizontal /= length;
+        vertical /= length;
+        runtimeOffset[0] += horizontal * component.speed * simulationDelta;
+        if (component.plane === 'xy') runtimeOffset[1] += vertical * component.speed * simulationDelta;
+        else runtimeOffset[2] -= vertical * component.speed * simulationDelta;
+      }
+
+      root.position.set(
+        basePosition[0] + runtimeOffset[0],
+        basePosition[1] + runtimeOffset[1],
+        basePosition[2] + runtimeOffset[2],
+      );
+      root.rotation.set(...baseRotation, 'XYZ');
+      root.scale.fromArray(baseScale);
+
+      for (const component of components) {
+        if (!component.enabled) continue;
+        if (component.type === 'rotate') {
+          root.rotation[component.axis] += this.runtimeTime * component.speed;
+        } else if (component.type === 'float') {
+          root.position[component.axis] +=
+            Math.sin(this.runtimeTime * component.speed * 2 + component.phase) * component.distance;
+        }
       }
     }
   }
@@ -583,6 +653,15 @@ export class ViewportEngine {
           selectedId: this.selectedId,
           objectCount: this.objects.size,
         },
+        runtime: {
+          tick: this.runtimeTick,
+          fixedDelta: 1 / 60,
+          transforms: Object.fromEntries([...this.objects].map(([id, object]) => [id, {
+            position: object.position.toArray(),
+            rotation: [object.rotation.x, object.rotation.y, object.rotation.z],
+            scale: object.scale.toArray(),
+          }])),
+        },
       };
       this.frames = 0;
       this.statsElapsed = 0;
@@ -597,6 +676,10 @@ export class ViewportEngine {
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
     this.canvas.removeEventListener('dblclick', this.onDoubleClick);
+    window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.onWindowBlur);
+    this.keys.clear();
     this.orbit.dispose();
     this.transformControls.dispose();
     for (const object of this.objects.values()) this.disposeObject(object);

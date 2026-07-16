@@ -22,6 +22,15 @@ interface ThreeStudioDiagnostics {
     selectedId: string | null;
     objectCount: number;
   };
+  runtime: {
+    tick: number;
+    fixedDelta: number;
+    transforms: Record<string, {
+      position: number[];
+      rotation: number[];
+      scale: number[];
+    }>;
+  };
 }
 
 interface Window {

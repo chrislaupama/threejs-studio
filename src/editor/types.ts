@@ -40,12 +40,37 @@ export interface CameraData {
   primary: boolean;
 }
 
-export interface BehaviorData {
-  type: 'rotate' | 'float';
+export type Axis = 'x' | 'y' | 'z';
+
+interface GameplayComponentBase {
+  id: string;
   enabled: boolean;
-  speed: number;
-  amplitude: number;
 }
+
+export interface RotateGameplayComponent extends GameplayComponentBase {
+  type: 'rotate';
+  speed: number;
+  axis: Axis;
+}
+
+export interface FloatGameplayComponent extends GameplayComponentBase {
+  type: 'float';
+  speed: number;
+  distance: number;
+  axis: Axis;
+  phase: number;
+}
+
+export interface KeyboardMoveGameplayComponent extends GameplayComponentBase {
+  type: 'keyboardMove';
+  speed: number;
+  plane: 'xz' | 'xy';
+}
+
+export type GameplayComponent =
+  | RotateGameplayComponent
+  | FloatGameplayComponent
+  | KeyboardMoveGameplayComponent;
 
 export interface SceneNode {
   id: string;
@@ -59,7 +84,7 @@ export interface SceneNode {
   material?: MaterialData;
   light?: LightData;
   camera?: CameraData;
-  behavior?: BehaviorData;
+  components: GameplayComponent[];
   castShadow?: boolean;
   receiveShadow?: boolean;
 }
@@ -69,13 +94,15 @@ export interface ProjectSettings {
   fogColor: string;
   fogNear: number;
   fogFar: number;
+  fogEnabled: boolean;
+  exposure: number;
   gridSize: number;
   gridDivisions: number;
   shadows: boolean;
 }
 
 export interface ProjectDocument {
-  schemaVersion: 1;
+  schemaVersion: 2;
   id: string;
   name: string;
   sceneName: string;

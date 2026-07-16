@@ -1,4 +1,8 @@
 import type {
+  Axis,
+  CameraData,
+  GameplayComponent,
+  LightData,
   MaterialData,
   PrimitiveType,
   ProjectDocument,
@@ -6,8 +10,6 @@ import type {
   StudioAsset,
   TransformData,
 } from './types';
-
-const TAU = Math.PI * 2;
 
 const transform = (
   position: TransformData['position'] = [0, 0, 0],
@@ -31,6 +33,22 @@ const createProjectId = () =>
 export const createNodeId = (prefix = 'entity') =>
   `${prefix}-${Math.random().toString(36).slice(2, 8)}-${Date.now().toString(36).slice(-4)}`;
 
+const createComponentId = (type: GameplayComponent['type']) => createNodeId(`component-${type}`);
+
+export function createGameplayComponent(type: 'rotate'): Extract<GameplayComponent, { type: 'rotate' }>;
+export function createGameplayComponent(type: 'float'): Extract<GameplayComponent, { type: 'float' }>;
+export function createGameplayComponent(type: 'keyboardMove'): Extract<GameplayComponent, { type: 'keyboardMove' }>;
+export function createGameplayComponent(type: GameplayComponent['type']): GameplayComponent;
+export function createGameplayComponent(type: GameplayComponent['type']): GameplayComponent {
+  if (type === 'float') {
+    return { id: createComponentId(type), type, enabled: true, speed: 1, distance: 0.25, axis: 'y', phase: 0 };
+  }
+  if (type === 'keyboardMove') {
+    return { id: createComponentId(type), type, enabled: true, speed: 3.5, plane: 'xz' };
+  }
+  return { id: createComponentId(type), type, enabled: true, speed: 0.8, axis: 'y' };
+}
+
 export const BUILT_IN_ASSETS: StudioAsset[] = [
   { id: 'scene-main', name: 'MainWorld', kind: 'scene', meta: 'Scene · 13 objects' },
   { id: 'primitive-box', name: 'Crate', kind: 'primitive', primitive: 'box', color: '#8493a8', meta: 'Prefab · Mesh' },
@@ -47,7 +65,7 @@ export const BUILT_IN_ASSETS: StudioAsset[] = [
 
 export function createStarterProject(): ProjectDocument {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: createProjectId(),
     name: 'Starter Project',
     sceneName: 'MainWorld',
@@ -57,6 +75,8 @@ export function createStarterProject(): ProjectDocument {
       fogColor: '#111823',
       fogNear: 18,
       fogFar: 56,
+      fogEnabled: true,
+      exposure: 1.08,
       gridSize: 30,
       gridDivisions: 30,
       shadows: true,
@@ -70,6 +90,7 @@ export function createStarterProject(): ProjectDocument {
         visible: true,
         locked: true,
         transform: transform(),
+        components: [],
       },
       {
         id: 'environment',
@@ -79,6 +100,7 @@ export function createStarterProject(): ProjectDocument {
         visible: true,
         locked: false,
         transform: transform(),
+        components: [],
       },
       {
         id: 'ground',
@@ -91,6 +113,7 @@ export function createStarterProject(): ProjectDocument {
         transform: transform([0, -0.06, 0], [-Math.PI / 2, 0, 0], [28, 28, 1]),
         material: material('#26303c', 0.88, 0.04),
         receiveShadow: true,
+        components: [],
       },
       {
         id: 'platform',
@@ -104,6 +127,7 @@ export function createStarterProject(): ProjectDocument {
         material: material('#303c4c', 0.32, 0.52),
         castShadow: true,
         receiveShadow: true,
+        components: [],
       },
       {
         id: 'arch-left',
@@ -117,6 +141,7 @@ export function createStarterProject(): ProjectDocument {
         material: material('#39475a', 0.38, 0.36),
         castShadow: true,
         receiveShadow: true,
+        components: [],
       },
       {
         id: 'arch-right',
@@ -130,6 +155,7 @@ export function createStarterProject(): ProjectDocument {
         material: material('#39475a', 0.38, 0.36),
         castShadow: true,
         receiveShadow: true,
+        components: [],
       },
       {
         id: 'arch-top',
@@ -143,6 +169,7 @@ export function createStarterProject(): ProjectDocument {
         material: material('#354356', 0.38, 0.42, '#263b49', 0.2),
         castShadow: true,
         receiveShadow: true,
+        components: [],
       },
       {
         id: 'player-rig',
@@ -152,6 +179,9 @@ export function createStarterProject(): ProjectDocument {
         visible: true,
         locked: false,
         transform: transform([0, 1.55, 0]),
+        components: [
+          { id: 'player-move', type: 'keyboardMove', enabled: true, speed: 3.5, plane: 'xz' },
+        ],
       },
       {
         id: 'player-core',
@@ -165,7 +195,9 @@ export function createStarterProject(): ProjectDocument {
         material: material('#51dfce', 0.24, 0.58, '#1fd8c3', 0.42),
         castShadow: true,
         receiveShadow: true,
-        behavior: { type: 'float', enabled: true, speed: 1.25, amplitude: 0.12 },
+        components: [
+          { id: 'player-core-float', type: 'float', enabled: true, speed: 1.25, distance: 0.12, axis: 'y', phase: 0 },
+        ],
       },
       {
         id: 'player-ring',
@@ -178,7 +210,9 @@ export function createStarterProject(): ProjectDocument {
         transform: transform([0, 0.15, 0], [Math.PI / 2, 0, 0], [1.65, 1.65, 1.65]),
         material: material('#a58bf5', 0.2, 0.72, '#7659f2', 0.6),
         castShadow: true,
-        behavior: { type: 'rotate', enabled: true, speed: 0.72, amplitude: 0 },
+        components: [
+          { id: 'player-ring-rotate', type: 'rotate', enabled: true, speed: 0.72, axis: 'y' },
+        ],
       },
       {
         id: 'main-camera',
@@ -189,6 +223,7 @@ export function createStarterProject(): ProjectDocument {
         locked: false,
         transform: transform([9, 6.5, 11], [-0.34, 0.68, 0]),
         camera: { fov: 48, near: 0.1, far: 200, primary: true },
+        components: [],
       },
       {
         id: 'key-light',
@@ -199,6 +234,7 @@ export function createStarterProject(): ProjectDocument {
         locked: false,
         transform: transform([6, 10, 7], [-0.8, 0.55, 0]),
         light: { type: 'directional', color: '#d8eeff', intensity: 3.2, distance: 18, castShadow: true },
+        components: [],
       },
       {
         id: 'rim-light',
@@ -209,6 +245,7 @@ export function createStarterProject(): ProjectDocument {
         locked: false,
         transform: transform([-4, 4.5, -2], [0, 0, 0]),
         light: { type: 'point', color: '#8b72ff', intensity: 34, distance: 15, castShadow: false },
+        components: [],
       },
     ],
   };
@@ -274,6 +311,7 @@ export function addPrimitive(
     material: material(color, primitive === 'plane' ? 0.82 : 0.42, primitive === 'plane' ? 0.02 : 0.16),
     castShadow: primitive !== 'plane',
     receiveShadow: true,
+    components: [],
   });
   next.updatedAt = new Date().toISOString();
   return { project: next, nodeId };
@@ -311,6 +349,7 @@ export function duplicateNode(
         copy.name = `${node.name} Copy`;
         copy.transform.position = [node.transform.position[0] + 1.25, node.transform.position[1], node.transform.position[2] + 0.35];
       }
+      copy.components = copy.components.map((component) => ({ ...component, id: createComponentId(component.type) }));
       return copy;
     });
 
@@ -354,10 +393,342 @@ export function applyMaterial(project: ProjectDocument, id: string, color: strin
   });
 }
 
+type UnknownRecord = Record<string, unknown>;
+
+export type LoadProjectDocumentResult =
+  | { ok: true; project: ProjectDocument; warnings: string[] }
+  | { ok: false; errors: string[] };
+
+const nodeKinds = ['group', 'mesh', 'light', 'camera'] as const;
+const primitives = ['box', 'sphere', 'capsule', 'cylinder', 'cone', 'plane', 'torus'] as const;
+const axes = ['x', 'y', 'z'] as const;
+
+const isRecord = (value: unknown): value is UnknownRecord => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+function stringAt(record: UnknownRecord, key: string, path: string, errors: string[], fallback = '') {
+  const value = record[key];
+  if (typeof value === 'string') return value;
+  errors.push(`${path} must be a string.`);
+  return fallback;
+}
+
+function numberAt(record: UnknownRecord, key: string, path: string, errors: string[], fallback = 0) {
+  const value = record[key];
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  errors.push(`${path} must be a finite number.`);
+  return fallback;
+}
+
+function booleanAt(record: UnknownRecord, key: string, path: string, errors: string[], fallback = false) {
+  const value = record[key];
+  if (typeof value === 'boolean') return value;
+  errors.push(`${path} must be a boolean.`);
+  return fallback;
+}
+
+function vec3At(value: unknown, path: string, errors: string[], fallback: TransformData['position']): TransformData['position'] {
+  if (
+    Array.isArray(value) &&
+    value.length === 3 &&
+    value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))
+  ) {
+    return [value[0], value[1], value[2]];
+  }
+  errors.push(`${path} must contain exactly three finite numbers.`);
+  return fallback;
+}
+
+function clampWithWarning(value: number, min: number, max: number, path: string, warnings: string[]) {
+  const next = Math.min(max, Math.max(min, value));
+  if (next !== value) warnings.push(`${path} was clamped to ${next}.`);
+  return next;
+}
+
+function normalizeTransform(value: unknown, path: string, errors: string[]): TransformData {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object.`);
+    return transform();
+  }
+  return {
+    position: vec3At(value.position, `${path}.position`, errors, [0, 0, 0]),
+    rotation: vec3At(value.rotation, `${path}.rotation`, errors, [0, 0, 0]),
+    scale: vec3At(value.scale, `${path}.scale`, errors, [1, 1, 1]),
+  };
+}
+
+function normalizeMaterial(value: unknown, path: string, errors: string[]): MaterialData | undefined {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object for mesh nodes.`);
+    return undefined;
+  }
+  return {
+    color: stringAt(value, 'color', `${path}.color`, errors, '#ffffff'),
+    emissive: stringAt(value, 'emissive', `${path}.emissive`, errors, '#000000'),
+    emissiveIntensity: numberAt(value, 'emissiveIntensity', `${path}.emissiveIntensity`, errors),
+    metalness: numberAt(value, 'metalness', `${path}.metalness`, errors),
+    roughness: numberAt(value, 'roughness', `${path}.roughness`, errors, 0.5),
+  };
+}
+
+function normalizeLight(value: unknown, path: string, errors: string[]): LightData | undefined {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object for light nodes.`);
+    return undefined;
+  }
+  const type = value.type;
+  if (type !== 'directional' && type !== 'point' && type !== 'spot') errors.push(`${path}.type is not supported.`);
+  return {
+    type: type === 'point' || type === 'spot' ? type : 'directional',
+    color: stringAt(value, 'color', `${path}.color`, errors, '#ffffff'),
+    intensity: numberAt(value, 'intensity', `${path}.intensity`, errors, 1),
+    distance: numberAt(value, 'distance', `${path}.distance`, errors),
+    castShadow: booleanAt(value, 'castShadow', `${path}.castShadow`, errors),
+  };
+}
+
+function normalizeCamera(value: unknown, path: string, errors: string[]): CameraData | undefined {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object for camera nodes.`);
+    return undefined;
+  }
+  return {
+    fov: numberAt(value, 'fov', `${path}.fov`, errors, 48),
+    near: numberAt(value, 'near', `${path}.near`, errors, 0.1),
+    far: numberAt(value, 'far', `${path}.far`, errors, 200),
+    primary: booleanAt(value, 'primary', `${path}.primary`, errors),
+  };
+}
+
+function normalizeComponent(
+  value: unknown,
+  path: string,
+  errors: string[],
+  warnings: string[],
+  usedIds: Set<string>,
+): GameplayComponent | null {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object.`);
+    return null;
+  }
+  const type = value.type;
+  if (type !== 'rotate' && type !== 'float' && type !== 'keyboardMove') {
+    errors.push(`${path}.type is not supported.`);
+    return null;
+  }
+  let id = typeof value.id === 'string' && value.id ? value.id : createComponentId(type);
+  if (typeof value.id !== 'string' || !value.id) warnings.push(`${path}.id was generated.`);
+  if (usedIds.has(id)) {
+    id = createComponentId(type);
+    warnings.push(`${path}.id was duplicated and has been replaced.`);
+  }
+  usedIds.add(id);
+  const enabled = booleanAt(value, 'enabled', `${path}.enabled`, errors, true);
+  const speed = numberAt(value, 'speed', `${path}.speed`, errors, type === 'keyboardMove' ? 3.5 : 1);
+  if (type === 'keyboardMove') {
+    const plane = value.plane;
+    if (plane !== 'xz' && plane !== 'xy') errors.push(`${path}.plane must be "xz" or "xy".`);
+    return { id, type, enabled, speed, plane: plane === 'xy' ? 'xy' : 'xz' };
+  }
+  const axisValue = value.axis;
+  if (!axes.includes(axisValue as Axis)) errors.push(`${path}.axis must be "x", "y", or "z".`);
+  const axis = axes.includes(axisValue as Axis) ? (axisValue as Axis) : 'y';
+  if (type === 'float') {
+    return {
+      id,
+      type,
+      enabled,
+      speed,
+      distance: numberAt(value, 'distance', `${path}.distance`, errors, 0.25),
+      axis,
+      phase: numberAt(value, 'phase', `${path}.phase`, errors),
+    };
+  }
+  return { id, type, enabled, speed, axis };
+}
+
+function migrateVersionOne(value: UnknownRecord, warnings: string[]): UnknownRecord {
+  const migrated = structuredClone(value) as UnknownRecord;
+  migrated.schemaVersion = 2;
+  const settings = isRecord(migrated.settings) ? migrated.settings : {};
+  migrated.settings = { ...settings, fogEnabled: true, exposure: 1.08 };
+  let converted = 0;
+  if (Array.isArray(migrated.nodes)) {
+    migrated.nodes = migrated.nodes.map((entry, index) => {
+      if (!isRecord(entry)) return entry;
+      const node = { ...entry };
+      const existing = Array.isArray(node.components) ? [...node.components] : [];
+      const behavior = node.behavior;
+      if (isRecord(behavior) && (behavior.type === 'rotate' || behavior.type === 'float')) {
+        const nodeId = typeof node.id === 'string' ? node.id : String(index);
+        const enabled = typeof behavior.enabled === 'boolean' ? behavior.enabled : true;
+        const speed = typeof behavior.speed === 'number' && Number.isFinite(behavior.speed) ? behavior.speed : 1;
+        existing.push(
+          behavior.type === 'rotate'
+            ? { id: `legacy-${nodeId}-rotate`, type: 'rotate', enabled, speed, axis: 'y' }
+            : {
+                id: `legacy-${nodeId}-float`,
+                type: 'float',
+                enabled,
+                speed,
+                distance:
+                  typeof behavior.amplitude === 'number' && Number.isFinite(behavior.amplitude) ? behavior.amplitude : 0.25,
+                axis: 'y',
+                phase: 0,
+              },
+        );
+        converted += 1;
+      } else if (behavior !== undefined) {
+        warnings.push(`nodes[${index}].behavior was not recognized and was skipped during migration.`);
+      }
+      node.components = existing;
+      delete node.behavior;
+      return node;
+    });
+  }
+  warnings.push(`Migrated project schema from v1 to v2${converted ? ` and converted ${converted} behavior${converted === 1 ? '' : 's'}` : ''}.`);
+  return migrated;
+}
+
+export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
+  if (!isRecord(value)) return { ok: false, errors: ['Project must be a JSON object.'] };
+  if (typeof value.schemaVersion === 'number' && value.schemaVersion > 2) {
+    return { ok: false, errors: [`Project schema v${value.schemaVersion} is newer than this editor supports.`] };
+  }
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) {
+    return { ok: false, errors: ['schemaVersion must be 1 or 2.'] };
+  }
+
+  const warnings: string[] = [];
+  const source = value.schemaVersion === 1 ? migrateVersionOne(value, warnings) : structuredClone(value) as UnknownRecord;
+  const errors: string[] = [];
+  const settingsValue = source.settings;
+  if (!isRecord(settingsValue)) errors.push('settings must be an object.');
+  const settingsRecord = isRecord(settingsValue) ? settingsValue : {};
+  const fogNear = clampWithWarning(
+    numberAt(settingsRecord, 'fogNear', 'settings.fogNear', errors, 18),
+    0,
+    100_000,
+    'settings.fogNear',
+    warnings,
+  );
+  let fogFar = numberAt(settingsRecord, 'fogFar', 'settings.fogFar', errors, 56);
+  if (fogFar <= fogNear) {
+    fogFar = fogNear + 1;
+    warnings.push(`settings.fogFar was raised to ${fogFar} so it is beyond fogNear.`);
+  }
+  const settings: ProjectDocument['settings'] = {
+    background: stringAt(settingsRecord, 'background', 'settings.background', errors, '#111823'),
+    fogColor: stringAt(settingsRecord, 'fogColor', 'settings.fogColor', errors, '#111823'),
+    fogNear,
+    fogFar,
+    fogEnabled: booleanAt(settingsRecord, 'fogEnabled', 'settings.fogEnabled', errors, true),
+    exposure: clampWithWarning(numberAt(settingsRecord, 'exposure', 'settings.exposure', errors, 1.08), 0.1, 4, 'settings.exposure', warnings),
+    gridSize: clampWithWarning(numberAt(settingsRecord, 'gridSize', 'settings.gridSize', errors, 30), 1, 1000, 'settings.gridSize', warnings),
+    gridDivisions: Math.round(clampWithWarning(numberAt(settingsRecord, 'gridDivisions', 'settings.gridDivisions', errors, 30), 1, 1000, 'settings.gridDivisions', warnings)),
+    shadows: booleanAt(settingsRecord, 'shadows', 'settings.shadows', errors, true),
+  };
+
+  const nodesValue = source.nodes;
+  if (!Array.isArray(nodesValue)) errors.push('nodes must be an array.');
+  const usedNodeIds = new Set<string>();
+  const usedComponentIds = new Set<string>();
+  const nodes: SceneNode[] = (Array.isArray(nodesValue) ? nodesValue : []).flatMap((entry, index) => {
+    const path = `nodes[${index}]`;
+    if (!isRecord(entry)) {
+      errors.push(`${path} must be an object.`);
+      return [];
+    }
+    const id = stringAt(entry, 'id', `${path}.id`, errors);
+    if (usedNodeIds.has(id)) errors.push(`${path}.id duplicates node id "${id}".`);
+    usedNodeIds.add(id);
+    const kindValue = entry.kind;
+    if (!nodeKinds.includes(kindValue as SceneNode['kind'])) errors.push(`${path}.kind is not supported.`);
+    const kind: SceneNode['kind'] = nodeKinds.includes(kindValue as SceneNode['kind'])
+      ? (kindValue as SceneNode['kind'])
+      : 'group';
+    const parentValue = entry.parentId;
+    if (parentValue !== null && typeof parentValue !== 'string') errors.push(`${path}.parentId must be a string or null.`);
+    const componentValues = entry.components;
+    if (!Array.isArray(componentValues)) errors.push(`${path}.components must be an array.`);
+    const components = (Array.isArray(componentValues) ? componentValues : []).flatMap((component, componentIndex) => {
+      const normalized = normalizeComponent(component, `${path}.components[${componentIndex}]`, errors, warnings, usedComponentIds);
+      return normalized ? [normalized] : [];
+    });
+    const node: SceneNode = {
+      id,
+      name: stringAt(entry, 'name', `${path}.name`, errors, 'Untitled'),
+      kind,
+      parentId: typeof parentValue === 'string' ? parentValue : null,
+      visible: booleanAt(entry, 'visible', `${path}.visible`, errors, true),
+      locked: booleanAt(entry, 'locked', `${path}.locked`, errors),
+      transform: normalizeTransform(entry.transform, `${path}.transform`, errors),
+      components,
+    };
+    if (kind === 'mesh') {
+      const primitiveValue = entry.primitive;
+      if (!primitives.includes(primitiveValue as PrimitiveType)) errors.push(`${path}.primitive is not supported.`);
+      node.primitive = primitives.includes(primitiveValue as PrimitiveType) ? (primitiveValue as PrimitiveType) : 'box';
+      node.material = normalizeMaterial(entry.material, `${path}.material`, errors);
+      if (entry.castShadow !== undefined) node.castShadow = booleanAt(entry, 'castShadow', `${path}.castShadow`, errors);
+      if (entry.receiveShadow !== undefined) node.receiveShadow = booleanAt(entry, 'receiveShadow', `${path}.receiveShadow`, errors);
+    } else if (kind === 'light') {
+      node.light = normalizeLight(entry.light, `${path}.light`, errors);
+    } else if (kind === 'camera') {
+      node.camera = normalizeCamera(entry.camera, `${path}.camera`, errors);
+    }
+    return [node];
+  });
+
+  for (const [index, node] of nodes.entries()) {
+    if (node.parentId && !usedNodeIds.has(node.parentId)) errors.push(`nodes[${index}].parentId references missing node "${node.parentId}".`);
+  }
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  for (const [index, node] of nodes.entries()) {
+    const chain = new Set([node.id]);
+    let parentId = node.parentId;
+    while (parentId) {
+      if (chain.has(parentId)) {
+        errors.push(`nodes[${index}].parentId creates a hierarchy cycle through "${parentId}".`);
+        break;
+      }
+      chain.add(parentId);
+      parentId = nodesById.get(parentId)?.parentId ?? null;
+    }
+  }
+  if (!nodes.some((node) => node.parentId === null)) errors.push('nodes must include at least one root node.');
+
+  const id = stringAt(source, 'id', 'id', errors);
+  const name = stringAt(source, 'name', 'name', errors, 'Untitled Project');
+  const sceneName = stringAt(source, 'sceneName', 'sceneName', errors, 'MainWorld');
+  const updatedAt = stringAt(source, 'updatedAt', 'updatedAt', errors, new Date().toISOString());
+
+  if (errors.length) return { ok: false, errors };
+  return {
+    ok: true,
+    warnings,
+    project: {
+      schemaVersion: 2,
+      id,
+      name,
+      sceneName,
+      updatedAt,
+      settings,
+      nodes,
+    },
+  };
+}
+
 export function isProjectDocument(value: unknown): value is ProjectDocument {
-  if (!value || typeof value !== 'object') return false;
-  const candidate = value as Partial<ProjectDocument>;
-  return candidate.schemaVersion === 1 && typeof candidate.name === 'string' && Array.isArray(candidate.nodes);
+  if (!isRecord(value) || value.schemaVersion !== 2 || !Array.isArray(value.nodes) || !isRecord(value.settings)) return false;
+  const result = loadProjectDocument(value);
+  return (
+    typeof value.name === 'string' &&
+    typeof value.settings.fogEnabled === 'boolean' &&
+    typeof value.settings.exposure === 'number' &&
+    value.nodes.every((node) => isRecord(node) && Array.isArray(node.components)) &&
+    result.ok &&
+    result.warnings.length === 0
+  );
 }
 
 export function downloadTextFile(contents: string, filename: string, type = 'application/json') {
@@ -384,7 +755,7 @@ export function buildRuntimeHtml(project: ProjectDocument): string {
 </head>
 <body>
   <div class="badge"><b>THREEJS</b> GAME STUDIO · ${project.sceneName.replaceAll('<', '&lt;')}</div>
-  <div class="hint">Drag to orbit · Scroll to zoom</div>
+  <div class="hint">Drag to orbit · Scroll to zoom · WASD / arrows move</div>
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -396,16 +767,16 @@ export function buildRuntimeHtml(project: ProjectDocument): string {
     renderer.shadowMap.type=THREE.PCFShadowMap;
     renderer.outputColorSpace=THREE.SRGBColorSpace;
     renderer.toneMapping=THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure=1.1;
+    renderer.toneMappingExposure=project.settings.exposure;
     document.body.prepend(renderer.domElement);
     const scene=new THREE.Scene();
     scene.background=new THREE.Color(project.settings.background);
-    scene.fog=new THREE.Fog(project.settings.fogColor,project.settings.fogNear,project.settings.fogFar);
+    scene.fog=project.settings.fogEnabled?new THREE.Fog(project.settings.fogColor,project.settings.fogNear,project.settings.fogFar):null;
     scene.add(new THREE.HemisphereLight(0xbfd9ff,0x1a2028,1.15));
     const objects=new Map();
     const makeGeometry=(kind)=>({box:()=>new THREE.BoxGeometry(),sphere:()=>new THREE.SphereGeometry(.5,40,24),capsule:()=>new THREE.CapsuleGeometry(.5,1,8,24),cylinder:()=>new THREE.CylinderGeometry(.5,.5,1,32),cone:()=>new THREE.ConeGeometry(.55,1,32),plane:()=>new THREE.PlaneGeometry(1,1),torus:()=>new THREE.TorusGeometry(.6,.12,18,48)}[kind]());
     for(const node of project.nodes){
-      const root=new THREE.Group(); root.name=node.name; root.userData.node=node; objects.set(node.id,root);
+      const root=new THREE.Group(); root.name=node.name; root.userData.node=node; root.userData.move=[0,0,0]; objects.set(node.id,root);
       if(node.kind==='mesh'){
         const m=node.material; const mat=new THREE.MeshStandardMaterial({color:m.color,roughness:m.roughness,metalness:m.metalness,emissive:m.emissive,emissiveIntensity:m.emissiveIntensity});
         const mesh=new THREE.Mesh(makeGeometry(node.primitive),mat); mesh.castShadow=!!node.castShadow; mesh.receiveShadow=!!node.receiveShadow; root.add(mesh);
@@ -427,7 +798,11 @@ export function buildRuntimeHtml(project: ProjectDocument): string {
     camera.updateMatrixWorld(true);
     const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.target.set(0,1.2,0);
     const clock=new THREE.Clock();
-    function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const n=root.userData.node;if(!n.behavior?.enabled)continue;if(n.behavior.type==='rotate')root.rotation.y+=dt*n.behavior.speed*${TAU.toFixed(8)}*.16;else if(n.behavior.type==='float')root.position.y=n.transform.position[1]+Math.sin(t*n.behavior.speed*2)*n.behavior.amplitude}controls.update();renderer.render(scene,camera)}
+    const keys=new Set();const moveKeys=new Set(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright']);
+    addEventListener('keydown',(event)=>{const key=event.key.toLowerCase();if(moveKeys.has(key)){keys.add(key);event.preventDefault()}});
+    addEventListener('keyup',(event)=>keys.delete(event.key.toLowerCase()));
+    addEventListener('blur',()=>keys.clear());
+    function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const n=root.userData.node;const move=root.userData.move;for(const component of n.components){if(!component.enabled||component.type!=='keyboardMove')continue;let horizontal=(keys.has('d')||keys.has('arrowright')?1:0)-(keys.has('a')||keys.has('arrowleft')?1:0);let vertical=(keys.has('w')||keys.has('arrowup')?1:0)-(keys.has('s')||keys.has('arrowdown')?1:0);const length=Math.hypot(horizontal,vertical)||1;horizontal/=length;vertical/=length;move[0]+=horizontal*component.speed*dt;if(component.plane==='xy')move[1]+=vertical*component.speed*dt;else move[2]-=vertical*component.speed*dt}root.position.fromArray(n.transform.position);root.position.x+=move[0];root.position.y+=move[1];root.position.z+=move[2];root.rotation.fromArray([...n.transform.rotation,'XYZ']);root.scale.fromArray(n.transform.scale);for(const component of n.components){if(!component.enabled)continue;if(component.type==='rotate')root.rotation[component.axis]+=t*component.speed;else if(component.type==='float')root.position[component.axis]+=Math.sin(t*component.speed*2+component.phase)*component.distance}}controls.update();renderer.render(scene,camera)}
     addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});frame();
   </script>
 </body>
