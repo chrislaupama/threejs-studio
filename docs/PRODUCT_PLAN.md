@@ -17,11 +17,12 @@ The core promise is:
 5. **Safe extension points.** User code runs behind a Worker or sandboxed-frame boundary, not in the editor origin.
 6. **Performance is inspectable.** Draw calls, triangles, textures, frame time, and runtime ownership stay visible.
 7. **Honest milestones.** A control ships when its workflow works end to end.
+8. **Human/AI authoring parity.** Every durable human authoring control must have a typed, validated capability over the same project operation; neither agents nor integrations receive direct React, DOM, renderer, or `Object3D` access.
 
 ## Milestone 1 — Editor foundation (implemented)
 
 - React + TypeScript editor shell around a direct Three.js viewport.
-- Versioned, validated schema-v2 project format with automatic schema-v1 behavior migration.
+- Versioned, validated schema-v3 project format with sequential schema-v1 behavior → schema-v2 component → schema-v3 asset-catalog migration.
 - Starter scene with meshes, lights, camera, materials, world settings, and stackable gameplay components.
 - Essentials and Advanced authoring experiences over one shared project, with a persisted real-action Quick Start journey.
 - Hierarchy, picking, transform gizmos, inspector, built-in assets, and scene/game tabs.
@@ -33,18 +34,38 @@ The core promise is:
 
 Success metric: a new user can follow Add → Style → Play → Build without knowing Three.js terminology, while an advanced user can stack and tune components, inspect renderer state, save/reload stable IDs, and export a runnable page.
 
-## Milestone 2 — Asset and prefab pipeline
+## Milestone 2 — Asset and prefab pipeline (model slice implemented)
 
-- IndexedDB project store with document migrations and idle autosave.
-- Binary asset records separated from project metadata.
-- GLB/glTF model import with scale, bounds, animation, triangle, material, and texture diagnostics.
+- Revisioned IndexedDB model storage with binary records separated from schema-v3 project metadata. **Implemented.**
+- Self-contained GLB/embedded-resource glTF import with fit/original sizing, bounds, animation-name, triangle, material, texture, and file-size diagnostics. **Implemented.**
+- Shared parsed-model cache, SkeletonUtils instances, reference counting, stale-load guards, explicit GPU disposal, and visible loading/missing/error recovery. **Implemented.**
+- Novice Create/import/reuse/relink flow plus Advanced Models catalog and technical diagnostics. **Implemented.**
+- Portable editable JSON package with embedded model sources and single-HTML online builds with referenced models embedded. **Implemented.**
+- Whole-project IndexedDB document storage with idle autosave and quota management.
 - PNG, JPEG, WebP, HDR/EXR, and audio import with thumbnails and load/error states.
-- Reference-counted asset cache, object-URL revocation, and explicit Three.js disposal.
 - Drag a model into the viewport; drag a material/texture onto a mesh.
 - Prefab creation, nested prefab instances, overrides, and missing-reference recovery.
 - Editable `.tjsstudio` ZIP package with `manifest.json`, project data, and assets.
+- Draco, Meshopt, KTX2, and multi-file glTF package ingestion with configured decoders and dependency mapping.
 
-Success metric: an imported GLB survives save/reload, instantiates multiple times without duplicate resource cost, and appears in an exported offline package.
+Current model-slice result: an imported GLB survives save/reload, instantiates multiple times without duplicate geometry/texture ownership, recovers from missing local bytes, round-trips through an editable package, and appears in the online single-HTML build. Milestone completion still requires the offline ZIP, general media assets, drag/drop, and prefab system.
+
+Verified slice limits: imports are capped at 100 MiB and must be self-contained; editable packages currently use in-memory base64 JSON; imported animation clips are cataloged but not yet playable; repeated models share GPU resources but are not automatically batched into instanced draw calls.
+
+## AI-native authoring foundation (registry/proposal/bridge slice implemented)
+
+- Versioned `threejs-game-studio.authoring` capability manifest with JSON-compatible input schemas, stable namespaced tools, declared scope metadata, read/write effects, risk levels, reversibility, and approval policies. Scope grants are not authenticated or enforced by the current same-page integration seam. **Implemented.**
+- Pure, immutable project tools for project/scene inspection, hierarchy and transforms, primitive materials, gameplay components, world/rendering settings, lights/cameras, and existing imported-model instances. Every successful result is validated before it can enter editor history. **Implemented.**
+- Local Guided Assistant with bounded plain-language planning and structured tool-call input, exact-value/contextual-risk proposal review, atomic pure project-tool multi-call validation, stale-revision rejection, one-step Undo, concurrent-proposal reservation, and normal autosave/viewport reconciliation. Project and editor-host mutations are reviewed separately, with host actions proposed one at a time. This is deliberately deterministic and not presented as a language model. **Implemented.**
+- Fifteen pure project tools plus fourteen browser-host definitions for editor context/diagnostics, selection, viewport, Play/Preview/Step controls, history, console, layout, save/export/build, and user-mediated file-picker requests, producing a 29-tool combined manifest; plus a versioned trusted same-page integration bridge over cloned data. **Implemented.**
+- Contributor parity rule and contract tests requiring new human authoring areas to gain matching typed capabilities and browser/Undo coverage. **Implemented and ongoing.**
+- Local MCP stdio sidecar with loopback pairing, explicit scopes, cancellation, structured conflicts, and audit attribution. **Planned; the current browser bridge is not an MCP server.**
+- Model-backed built-in provider connected through a local model, secure companion, or hosted token broker. **Planned; no model API key or cloud provider is bundled.**
+- Staged, digest-verified out-of-band asset transfer for external agents instead of large base64 tool arguments or unrestricted filesystem paths. **Planned.**
+
+Current AI-slice result: a human can ask the Guided Assistant for supported project changes, inspect the proposed typed calls, apply a pure project-tool plan as one reversible transaction, and continue editing through the normal UI. A trusted same-page integration can discover the same contract and is prevented from applying a plan against a stale authoring revision. Its scope labels are advisory metadata rather than an authorization boundary. External connectivity, authenticated scope enforcement, and model intelligence remain separate deployment phases.
+
+Success metric: adding a new human authoring surface fails the milestone unless its durable data is reachable through the shared capability registry or is explicitly documented as system-managed/read-only. See `docs/AI_ARCHITECTURE.md` for the capability matrix and security boundary.
 
 ## Milestone 3 — Gameplay framework
 
@@ -89,6 +110,7 @@ src/
   editor/
     model/             schemas, migrations, references, validation
     commands/          inverse operations and transactions
+    agent/             capability registry, policy, proposals, host adapters
     viewport/          renderer, scene bridge, picking, editor helpers
     panels/            hierarchy, inspector, assets, console, timeline
   runtime/
@@ -97,6 +119,8 @@ src/
   assets/              import, cache, thumbnails, lifecycle, diagnostics
   persistence/         IndexedDB and project package formats
   export/              runtime packaging and build profiles
+  integrations/
+    mcp/               local/hosted transport adapter over shared capabilities
   tests/               interaction, browser, visual, performance, migration
 ```
 
@@ -127,6 +151,11 @@ Project-specific budgets should become configurable build warnings rather than h
 | History becomes noisy or huge | Command transactions for gizmo drags and numeric scrubbing; bounded history and structural sharing later. |
 | Large projects overload React | Keep per-frame/transient state inside the imperative runtime; publish only coarse diagnostics to UI. |
 | Mobile editor becomes cramped | One-surface-at-a-time drawers and review mode; desktop remains recommended for precise authoring. |
+| Agent path drifts from human controls | Require every authorable schema area to register a shared typed capability and test visible, undoable parity. |
+| Agent overwrites intervening work | Require a monotonic base revision for proposals/external writes and reject stale plans instead of silently rebasing. |
+| Browser credentials leak | Ship no provider secret in Vite/client storage; use an external MCP host, local/desktop secret store, local model, or hosted token broker. |
+| Untrusted same-page code invokes the integration bridge | Treat the current global as a trusted integration seam; its scope labels are advisory until an authenticated companion enforces grants. |
+| External agents exfiltrate files/assets | Keep file choice user-mediated now; later use scoped pairing and staged digest-checked transfer rather than raw paths or inline binaries. |
 
 ## Definition of a credible “full game” release
 
@@ -138,3 +167,4 @@ The studio can claim full-game authoring when all of these exist end to end:
 - Desktop and mobile input/rendering pass automated and human playtests.
 - Save/load, migration, package import/export, missing assets, and runtime cleanup are tested.
 - A public extension contract exists so game-specific systems do not require forking the editor.
+- Every shipped authoring domain is discoverable and safely manipulable through the typed AI capability layer, with revision conflicts, approvals, and audit attribution enforced independently of the model or MCP client.

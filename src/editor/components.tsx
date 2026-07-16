@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   Box,
+  Boxes,
   Camera,
   CheckCircle2,
   ChevronDown,
@@ -23,13 +24,16 @@ import {
   Terminal,
   Trash2,
   Triangle,
+  Upload,
   UnlockKeyhole,
   Waves,
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { createGameplayComponent } from './project';
+import { formatBytes, formatTriangles } from './modelAssets';
 import type {
+  AssetStatus,
   ConsoleEntry,
   GameplayComponent,
   PrimitiveType,
@@ -84,6 +88,7 @@ function NodeGlyph({ node }: { node: SceneNode }) {
   if (node.kind === 'camera') return <Camera size={iconSize} />;
   if (node.kind === 'light') return <Lightbulb size={iconSize} />;
   if (node.kind === 'group') return <Folder size={iconSize} />;
+  if (node.kind === 'model') return <Boxes size={iconSize} />;
   if (node.primitive === 'sphere') return <Circle size={iconSize} />;
   if (node.primitive === 'cylinder' || node.primitive === 'capsule') return <Cylinder size={iconSize} />;
   if (node.primitive === 'cone') return <Triangle size={iconSize} />;
@@ -398,8 +403,10 @@ interface InspectorProps {
   disabled: boolean;
   project: ProjectDocument;
   experience: ExperienceLevel;
+  assetStatuses: Record<string, AssetStatus>;
   onUpdate: (node: SceneNode, label: string) => void;
   onUpdateSettings: (settings: ProjectSettings, label: string) => void;
+  onRelinkModel: (assetId: string) => void;
   onDelete: () => void;
 }
 
@@ -461,7 +468,7 @@ function GameplayComponentEditor({
   );
 }
 
-export function InspectorPanel({ node, disabled, project, experience, onUpdate, onUpdateSettings, onDelete }: InspectorProps) {
+export function InspectorPanel({ node, disabled, project, experience, assetStatuses, onUpdate, onUpdateSettings, onRelinkModel, onDelete }: InspectorProps) {
   const [componentMenuOpen, setComponentMenuOpen] = useState(false);
   if (!node) {
     return (
@@ -479,6 +486,8 @@ export function InspectorPanel({ node, disabled, project, experience, onUpdate, 
   const updateTransform = (key: keyof SceneNode['transform'], value: [number, number, number]) => {
     onUpdate({ ...node, transform: { ...node.transform, [key]: value } }, `Change ${key}`);
   };
+  const modelAsset = node.model ? project.assets.find((asset) => asset.id === node.model?.assetId) : undefined;
+  const modelStatus = modelAsset ? assetStatuses[modelAsset.id] : undefined;
 
   const renderMaterialTechnicalFields = () => node.material ? (
     <div className="component-advanced-grid">
@@ -591,6 +600,41 @@ export function InspectorPanel({ node, disabled, project, experience, onUpdate, 
           </details>
         ) : null}
 
+        {node.kind === 'model' && node.model && modelAsset ? (
+          <details className="component model-component" open data-testid="model-diagnostics" data-asset-status={modelStatus?.state ?? 'checking'}>
+            <summary><ComponentHeading icon={<Boxes size={14} />} title={experience === 'essentials' ? '3D Model' : 'Model Renderer'} /></summary>
+            <div className="component-body property-stack">
+              <div className="model-asset-summary">
+                <span className="model-asset-mark"><Boxes size={18} /></span>
+                <span><strong>{modelAsset.name}</strong><small>{modelAsset.sourceFilename}</small></span>
+                <i className={`asset-status-dot is-${modelStatus?.state ?? 'checking'}`} title={modelStatus?.state ?? 'Checking local model'} />
+              </div>
+              {(modelStatus?.state === 'missing' || modelStatus?.state === 'error') ? (
+                <div className="model-missing-callout"><AlertTriangle size={14} /><span><strong>Model file is missing from this browser.</strong><small>{modelStatus.message ?? 'Relink the original GLB or glTF file to restore it.'}</small></span><button type="button" data-testid="model-relink" disabled={disabled} onClick={() => onRelinkModel(modelAsset.id)}><Upload size={12} /> Relink file</button></div>
+              ) : null}
+              <label className="property-row"><span className="property-label">Sizing</span><select value={node.model.fitMode} disabled={disabled} onChange={(event) => onUpdate({ ...node, model: { ...node.model!, fitMode: event.target.value as 'fit' | 'original' } }, 'Change model sizing')}><option value="fit">Fit to scene</option><option value="original">Original size</option></select></label>
+              {node.model.fitMode === 'fit' ? <label className="property-row"><span className="property-label">Scene size</span><NumberField label="m" value={node.model.targetSize} step={0.25} disabled={disabled} onCommit={(value) => onUpdate({ ...node, model: { ...node.model!, targetSize: Math.max(0.1, value) } }, 'Change model target size')} /></label> : null}
+              {experience === 'essentials' ? (
+                <p className="component-description">{modelAsset.diagnostics.meshes} mesh{modelAsset.diagnostics.meshes === 1 ? '' : 'es'} · {formatTriangles(modelAsset.diagnostics.triangles)} triangles. The original materials stay intact.</p>
+              ) : (
+                <div className="model-diagnostics-grid">
+                  <span><small>File</small><strong>{formatBytes(modelAsset.byteLength)}</strong></span>
+                  <span><small>Meshes</small><strong>{modelAsset.diagnostics.meshes}</strong></span>
+                  <span><small>Triangles</small><strong>{formatTriangles(modelAsset.diagnostics.triangles)}</strong></span>
+                  <span><small>Materials</small><strong>{modelAsset.diagnostics.materials}</strong></span>
+                  <span><small>Textures</small><strong>{modelAsset.diagnostics.textures}</strong></span>
+                  <span><small>Animations</small><strong>{modelAsset.diagnostics.animationNames.length}</strong></span>
+                  <span className="is-wide"><small>Bounds</small><strong>{modelAsset.diagnostics.bounds.size.map((value) => Number(value.toFixed(2))).join(' × ')} m</strong></span>
+                  <span className="is-wide"><small>Asset ID</small><code>{modelAsset.id}</code></span>
+                  {modelAsset.diagnostics.animationNames.length ? <span className="is-wide"><small>Animation clips</small><strong>{modelAsset.diagnostics.animationNames.join(', ')}</strong></span> : null}
+                  {modelAsset.diagnostics.warnings.map((warning) => <span className="is-wide is-warning" key={warning}><AlertTriangle size={11} /><small>{warning}</small></span>)}
+                </div>
+              )}
+              {experience === 'advanced' && modelStatus?.state !== 'missing' && modelStatus?.state !== 'error' ? <button type="button" className="model-relink-secondary" disabled={disabled} onClick={() => onRelinkModel(modelAsset.id)}><Upload size={12} /> Replace source file</button> : null}
+            </div>
+          </details>
+        ) : null}
+
         {node.kind === 'light' && node.light ? (
           <details className="component" open>
             <summary><ComponentHeading icon={<Lightbulb size={14} />} title="Light" /></summary>
@@ -650,12 +694,16 @@ export function InspectorPanel({ node, disabled, project, experience, onUpdate, 
 interface AssetGridProps {
   assets: StudioAsset[];
   selectedNode: SceneNode | undefined;
+  assetStatuses: Record<string, AssetStatus>;
   onActivate: (asset: StudioAsset) => void;
+  onImportModel: () => void;
+  onRelinkModel: (assetId: string) => void;
 }
 
 function AssetPreview({ asset }: { asset: StudioAsset }) {
   if (asset.kind === 'material') return <div className="asset-swatch" style={{ background: asset.color }}><span /></div>;
   if (asset.kind === 'scene') return <div className="scene-thumbnail"><Grid3X3 size={28} /><span /><i /></div>;
+  if (asset.kind === 'model') return <div className="model-thumbnail"><Boxes size={34} /><span /></div>;
   return (
     <div className="primitive-thumbnail" style={{ '--asset-color': asset.color } as React.CSSProperties}>
       {asset.primitive === 'sphere' ? <Circle size={36} /> : asset.primitive === 'cylinder' || asset.primitive === 'capsule' ? <Cylinder size={36} /> : asset.primitive === 'cone' ? <Triangle size={36} /> : <Box size={36} />}
@@ -663,7 +711,7 @@ function AssetPreview({ asset }: { asset: StudioAsset }) {
   );
 }
 
-function AssetGrid({ assets, selectedNode, onActivate }: AssetGridProps) {
+function AssetGrid({ assets, selectedNode, assetStatuses, onActivate, onImportModel, onRelinkModel }: AssetGridProps) {
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState<'all' | StudioAsset['kind']>('all');
   const [selectedAsset, setSelectedAsset] = useState<string | null>('scene-main');
@@ -678,12 +726,14 @@ function AssetGrid({ assets, selectedNode, onActivate }: AssetGridProps) {
         <button type="button" className={category === 'all' ? 'is-active' : ''} onClick={() => setCategory('all')}><Folder size={13} /> Assets <span>{assets.length}</span></button>
         <button type="button" className={category === 'scene' ? 'is-active' : ''} onClick={() => setCategory('scene')}><FileBox size={13} /> Scenes <span>{assets.filter((asset) => asset.kind === 'scene').length}</span></button>
         <button type="button" className={category === 'primitive' ? 'is-active' : ''} onClick={() => setCategory('primitive')}><Package size={13} /> Prefabs <span>{assets.filter((asset) => asset.kind === 'primitive').length}</span></button>
+        <button type="button" className={category === 'model' ? 'is-active' : ''} onClick={() => setCategory('model')}><Boxes size={13} /> Models <span>{assets.filter((asset) => asset.kind === 'model').length}</span></button>
         <button type="button" className={category === 'material' ? 'is-active' : ''} onClick={() => setCategory('material')}><Palette size={13} /> Materials <span>{assets.filter((asset) => asset.kind === 'material').length}</span></button>
       </nav>
       <div className="asset-browser">
         <div className="asset-browser-bar">
           <div className="asset-breadcrumb"><Folder size={13} /><span>Assets</span><ChevronRight size={12} /><strong>{category === 'all' ? 'All' : `${category[0].toUpperCase()}${category.slice(1)}s`}</strong></div>
           <label className="asset-search"><Search size={12} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search assets" /></label>
+          <button type="button" className="asset-import-model" data-testid="asset-import-model" onClick={onImportModel}><Upload size={12} /> Import model</button>
         </div>
         <div className="asset-grid" role="list">
           {visible.map((asset) => (
@@ -696,15 +746,21 @@ function AssetGrid({ assets, selectedNode, onActivate }: AssetGridProps) {
               onDoubleClick={() => onActivate(asset)}
               title={asset.kind === 'material' && !selectedNode ? 'Select a mesh before applying this material' : `Double-click to use ${asset.name}`}
               data-asset-id={asset.id}
+              data-asset-status={asset.kind === 'model' ? assetStatuses[asset.id]?.state ?? 'checking' : undefined}
             >
               <AssetPreview asset={asset} />
+              {asset.kind === 'model' && assetStatuses[asset.id] ? <i className={`asset-card-status is-${assetStatuses[asset.id].state}`} /> : null}
               <strong>{asset.name}</strong>
               <span>{asset.meta}</span>
             </button>
           ))}
           {visible.length === 0 ? <div className="asset-empty"><Search size={20} /><strong>No matching assets</strong><span>Try a different name or folder.</span></div> : null}
         </div>
-        {activeAsset ? <div className="asset-action-bar"><span><strong>{activeAsset.name}</strong><small>{activeAsset.meta}</small></span><button type="button" onClick={() => onActivate(activeAsset)}>{activeAsset.kind === 'material' ? 'Apply to selected' : activeAsset.kind === 'primitive' ? 'Add to scene' : 'Open scene'}</button></div> : null}
+        {activeAsset ? <div className={`asset-action-bar ${activeAsset.kind === 'model' ? 'is-model' : ''}`}>
+          <span><strong>{activeAsset.name}</strong><small>{activeAsset.meta}</small></span>
+          {activeAsset.kind === 'model' && activeAsset.modelAsset ? <div className="asset-inline-diagnostics"><span>{formatBytes(activeAsset.modelAsset.byteLength)}</span><span>{activeAsset.modelAsset.diagnostics.materials} mats</span><span>{activeAsset.modelAsset.diagnostics.textures} tex</span><span>{activeAsset.modelAsset.diagnostics.animationNames.length} clips</span></div> : null}
+          {activeAsset.kind === 'model' && (assetStatuses[activeAsset.id]?.state === 'missing' || assetStatuses[activeAsset.id]?.state === 'error') ? <button type="button" onClick={() => onRelinkModel(activeAsset.id)}>Relink file</button> : <button type="button" onClick={() => onActivate(activeAsset)}>{activeAsset.kind === 'material' ? 'Apply to selected' : activeAsset.kind === 'primitive' || activeAsset.kind === 'model' ? 'Add to scene' : 'Open scene'}</button>}
+        </div> : null}
       </div>
     </div>
   );
@@ -738,13 +794,16 @@ interface BottomDockProps {
   onTabChange: (tab: 'assets' | 'console') => void;
   assets: StudioAsset[];
   selectedNode: SceneNode | undefined;
+  assetStatuses: Record<string, AssetStatus>;
   entries: ConsoleEntry[];
   onActivateAsset: (asset: StudioAsset) => void;
+  onImportModel: () => void;
+  onRelinkModel: (assetId: string) => void;
   onClearConsole: () => void;
   onClose: () => void;
 }
 
-export function BottomDock({ tab, onTabChange, assets, selectedNode, entries, onActivateAsset, onClearConsole, onClose }: BottomDockProps) {
+export function BottomDock({ tab, onTabChange, assets, selectedNode, assetStatuses, entries, onActivateAsset, onImportModel, onRelinkModel, onClearConsole, onClose }: BottomDockProps) {
   return (
     <section className="bottom-dock" aria-label="Project dock" data-testid="bottom-dock">
       <div className="bottom-tabs">
@@ -754,7 +813,7 @@ export function BottomDock({ tab, onTabChange, assets, selectedNode, entries, on
         <button type="button" className="bottom-close" onClick={onClose} aria-label="Close bottom panel"><X size={14} /></button>
       </div>
       <div className="bottom-content">
-        {tab === 'assets' ? <AssetGrid assets={assets} selectedNode={selectedNode} onActivate={onActivateAsset} /> : <ConsoleView entries={entries} onClear={onClearConsole} />}
+        {tab === 'assets' ? <AssetGrid assets={assets} selectedNode={selectedNode} assetStatuses={assetStatuses} onActivate={onActivateAsset} onImportModel={onImportModel} onRelinkModel={onRelinkModel} /> : <ConsoleView entries={entries} onClear={onClearConsole} />}
       </div>
     </section>
   );

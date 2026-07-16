@@ -1,10 +1,14 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import { disposeModelResources, parseModelSource, type StoredModelSource } from './modelAssets';
 import type {
+  AssetLoadState,
   EditorMode,
   EditorTool,
   GameplayComponent,
+  ModelAssetRecord,
   PrimitiveType,
   ProjectDocument,
   RendererStats,
@@ -18,6 +22,26 @@ interface ViewportCallbacks {
   onTransformStart: (id: string) => void;
   onTransformChange: (id: string, transform: TransformData, final: boolean) => void;
   onStats: (stats: RendererStats) => void;
+  resolveAssetSource: (projectId: string, assetId: string, revision: number) => Promise<StoredModelSource | null>;
+  onAssetState: (nodeId: string, assetId: string, state: AssetLoadState, message?: string) => void;
+}
+
+interface CachedModel {
+  refs: number;
+  promise: Promise<{ scene: THREE.Group; animations: THREE.AnimationClip[] }>;
+  value?: { scene: THREE.Group; animations: THREE.AnimationClip[] };
+}
+
+interface ModelBinding {
+  key: string;
+  token: number;
+}
+
+class MissingModelSourceError extends Error {
+  constructor() {
+    super('Model file is missing from this browser. Relink the source file to restore it.');
+    this.name = 'MissingModelSourceError';
+  }
 }
 
 const editorOnlyKey = 'studioEditorOnly';
@@ -79,6 +103,9 @@ export class ViewportEngine {
   private readonly raycaster = new THREE.Raycaster();
   private readonly pointer = new THREE.Vector2();
   private readonly objects = new Map<string, THREE.Group>();
+  private readonly modelCache = new Map<string, CachedModel>();
+  private readonly modelBindings = new Map<string, ModelBinding>();
+  private readonly assetStatesByNode = new Map<string, AssetLoadState>();
   private readonly callbacks: ViewportCallbacks;
   private readonly resizeObserver: ResizeObserver;
   private grid: THREE.GridHelper;
@@ -98,6 +125,7 @@ export class ViewportEngine {
   private statsElapsed = 0;
   private frameElapsed = 0;
   private lastTime = performance.now();
+  private modelLoadToken = 0;
 
   constructor(canvas: HTMLCanvasElement, callbacks: ViewportCallbacks) {
     this.canvas = canvas;
@@ -263,11 +291,182 @@ export class ViewportEngine {
     this.callbacks.onSelect(null);
   }
 
+  private modelCacheKey(project: ProjectDocument, asset: ModelAssetRecord) {
+    return `${project.id}:${asset.id}:${asset.revision}`;
+  }
+
+  private setAssetState(nodeId: string, assetId: string, state: AssetLoadState, message?: string) {
+    this.assetStatesByNode.set(nodeId, state);
+    this.callbacks.onAssetState(nodeId, assetId, state, message);
+  }
+
+  private createModelPlaceholder(state: 'loading' | 'missing' | 'error') {
+    const root = new THREE.Group();
+    root.name = `Model ${state} placeholder`;
+    const color = state === 'loading' ? 0x6d8196 : state === 'missing' ? 0xf2bd67 : 0xf47f6b;
+    const material = new THREE.MeshBasicMaterial({ color, wireframe: true, transparent: true, opacity: 0.86 });
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.6, 1.2), material);
+    mesh.position.y = 0.8;
+    root.add(mesh);
+    const base = new THREE.Mesh(
+      new THREE.RingGeometry(0.62, 0.72, 24),
+      new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true, opacity: 0.48 }),
+    );
+    base.rotation.x = -Math.PI / 2;
+    base.position.y = 0.01;
+    root.add(base);
+    return root;
+  }
+
+  private replaceModelPlaceholder(root: THREE.Group, state: 'loading' | 'missing' | 'error') {
+    const previous = root.userData.modelPlaceholder as THREE.Object3D | undefined;
+    if (previous) this.disposeObject(previous);
+    const placeholder = this.createModelPlaceholder(state);
+    root.userData.modelPlaceholder = placeholder;
+    root.add(placeholder);
+  }
+
+  private removeModelPlaceholder(root: THREE.Group) {
+    const placeholder = root.userData.modelPlaceholder as THREE.Object3D | undefined;
+    if (!placeholder) return;
+    delete root.userData.modelPlaceholder;
+    this.disposeObject(placeholder);
+  }
+
+  private acquireModel(project: ProjectDocument, asset: ModelAssetRecord): CachedModel {
+    const key = this.modelCacheKey(project, asset);
+    let entry = this.modelCache.get(key);
+    if (!entry) {
+      const created = {} as CachedModel;
+      created.refs = 0;
+      created.promise = (async () => {
+        const source = await this.callbacks.resolveAssetSource(project.id, asset.id, asset.revision);
+        if (!source) throw new MissingModelSourceError();
+        const parsed = await parseModelSource(source);
+        created.value = parsed;
+        return parsed;
+      })();
+      entry = created;
+      this.modelCache.set(key, entry);
+    }
+    entry.refs += 1;
+    return entry;
+  }
+
+  private removeModelHost(root: THREE.Group) {
+    const host = root.userData.modelHost as THREE.Group | undefined;
+    if (!host) return;
+    delete root.userData.modelHost;
+    host.removeFromParent();
+    host.clear();
+  }
+
+  private releaseModelBinding(nodeId: string, root?: THREE.Group) {
+    const binding = this.modelBindings.get(nodeId);
+    if (!binding) return;
+    this.modelBindings.delete(nodeId);
+    if (root) this.removeModelHost(root);
+    const entry = this.modelCache.get(binding.key);
+    if (!entry) return;
+    entry.refs = Math.max(0, entry.refs - 1);
+    if (entry.refs > 0) return;
+    this.modelCache.delete(binding.key);
+    if (entry.value) {
+      disposeModelResources(entry.value.scene);
+      return;
+    }
+    void entry.promise.then((value) => {
+      if (entry.refs === 0) disposeModelResources(value.scene);
+    }).catch(() => {
+      // A failed or missing source owns no GPU resources.
+    });
+  }
+
+  private applyModelLayout(root: THREE.Group, node: SceneNode, asset: ModelAssetRecord) {
+    const host = root.userData.modelHost as THREE.Group | undefined;
+    if (!host || !node.model) return;
+    if (node.model.fitMode === 'original') {
+      host.position.set(0, 0, 0);
+      host.scale.setScalar(1);
+      return;
+    }
+    const { min, size, center } = asset.diagnostics.bounds;
+    const largest = Math.max(size[0], size[1], size[2], 0.0001);
+    const scale = node.model.targetSize / largest;
+    host.scale.setScalar(scale);
+    host.position.set(-center[0] * scale, -min[1] * scale, -center[2] * scale);
+  }
+
+  private ensureModelObject(root: THREE.Group, node: SceneNode, project: ProjectDocument) {
+    if (node.kind !== 'model' || !node.model) return;
+    const asset = project.assets.find((entry) => entry.id === node.model?.assetId);
+    if (!asset) {
+      this.releaseModelBinding(node.id, root);
+      this.removeModelHost(root);
+      this.replaceModelPlaceholder(root, 'error');
+      this.setAssetState(node.id, node.model.assetId, 'error', 'The project no longer contains this model asset.');
+      return;
+    }
+    const key = this.modelCacheKey(project, asset);
+    const current = this.modelBindings.get(node.id);
+    if (current?.key === key) {
+      this.applyModelLayout(root, node, asset);
+      return;
+    }
+
+    this.releaseModelBinding(node.id, root);
+    this.removeModelHost(root);
+    this.replaceModelPlaceholder(root, 'loading');
+    this.setAssetState(node.id, asset.id, 'loading');
+    const token = ++this.modelLoadToken;
+    this.modelBindings.set(node.id, { key, token });
+    const entry = this.acquireModel(project, asset);
+
+    void entry.promise.then(({ scene }) => {
+      const binding = this.modelBindings.get(node.id);
+      if (this.disposed || !binding || binding.key !== key || binding.token !== token || this.objects.get(node.id) !== root) return;
+      const instance = cloneSkeleton(scene);
+      instance.name = `${asset.name} Instance`;
+      instance.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.castShadow = Boolean(node.castShadow);
+          child.receiveShadow = Boolean(node.receiveShadow);
+        }
+      });
+      const host = new THREE.Group();
+      host.name = `${asset.name} Model Host`;
+      host.add(instance);
+      root.userData.modelHost = host;
+      root.add(host);
+      this.removeModelPlaceholder(root);
+      this.applyModelLayout(root, node, asset);
+      this.setAssetState(node.id, asset.id, 'ready');
+      if (this.selectedId === node.id) this.syncSelection();
+    }).catch((error: unknown) => {
+      const binding = this.modelBindings.get(node.id);
+      if (this.disposed || !binding || binding.key !== key || binding.token !== token || this.objects.get(node.id) !== root) return;
+      const missing = error instanceof MissingModelSourceError;
+      const message = error instanceof Error ? error.message : 'The model could not be loaded.';
+      this.replaceModelPlaceholder(root, missing ? 'missing' : 'error');
+      this.setAssetState(node.id, asset.id, missing ? 'missing' : 'error', message);
+    });
+  }
+
+  private disposeNodeObject(id: string, root: THREE.Group) {
+    this.releaseModelBinding(id, root);
+    this.removeModelHost(root);
+    this.removeModelPlaceholder(root);
+    this.assetStatesByNode.delete(id);
+    this.disposeObject(root);
+  }
+
   private createObject(node: SceneNode): THREE.Group {
     const root = new THREE.Group();
     root.name = node.name;
     root.userData.nodeId = node.id;
     root.userData.nodeKind = node.kind;
+
+    if (node.kind === 'model') this.replaceModelPlaceholder(root, 'loading');
 
     if (node.kind === 'mesh' && node.primitive && node.material) {
       const material = new THREE.MeshStandardMaterial({
@@ -351,10 +550,14 @@ export class ViewportEngine {
     root.userData.components = structuredClone(node.components);
 
     root.traverse((child) => {
-      if (child instanceof THREE.Mesh && child.material instanceof THREE.MeshStandardMaterial) {
-        updateStandardMaterial(child.material, node);
-        child.castShadow = Boolean(node.castShadow);
-        child.receiveShadow = Boolean(node.receiveShadow);
+      if (child instanceof THREE.Mesh) {
+        if (node.kind === 'mesh' && child.material instanceof THREE.MeshStandardMaterial) {
+          updateStandardMaterial(child.material, node);
+        }
+        if (node.kind === 'mesh' || node.kind === 'model') {
+          child.castShadow = Boolean(node.castShadow);
+          child.receiveShadow = Boolean(node.receiveShadow);
+        }
       }
       if (child instanceof THREE.Light && node.light) {
         child.color.set(node.light.color);
@@ -409,7 +612,7 @@ export class ViewportEngine {
       const nextNode = project.nodes.find((node) => node.id === id);
       if (!incoming.has(id) || nextNode?.kind !== object.userData.nodeKind) {
         if (this.selectedId === id) this.transformControls.detach();
-        this.disposeObject(object);
+        this.disposeNodeObject(id, object);
         this.objects.delete(id);
       }
     }
@@ -424,6 +627,7 @@ export class ViewportEngine {
       const parent = node.parentId ? this.objects.get(node.parentId) : this.contentRoot;
       if (parent && object.parent !== parent) parent.add(object);
       this.updateObject(object, node);
+      if (node.kind === 'model') this.ensureModelObject(object, node, project);
     }
 
     this.syncSelection();
@@ -652,6 +856,15 @@ export class ViewportEngine {
           viewMode: this.viewMode,
           selectedId: this.selectedId,
           objectCount: this.objects.size,
+          schemaVersion: this.document?.schemaVersion ?? 3,
+          assetCount: this.document?.assets.length ?? 0,
+        },
+        assets: {
+          statesByNode: Object.fromEntries(this.assetStatesByNode),
+          readyInstances: [...this.assetStatesByNode.values()].filter((state) => state === 'ready').length,
+          missingInstances: [...this.assetStatesByNode.values()].filter((state) => state === 'missing').length,
+          failedInstances: [...this.assetStatesByNode.values()].filter((state) => state === 'error').length,
+          cachedModels: this.modelCache.size,
         },
         runtime: {
           tick: this.runtimeTick,
@@ -682,7 +895,7 @@ export class ViewportEngine {
     this.keys.clear();
     this.orbit.dispose();
     this.transformControls.dispose();
-    for (const object of this.objects.values()) this.disposeObject(object);
+    for (const [id, object] of this.objects) this.disposeNodeObject(id, object);
     this.objects.clear();
     this.grid.geometry.dispose();
     disposeMaterial(this.grid.material);

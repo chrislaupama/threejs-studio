@@ -4,6 +4,8 @@ import type {
   GameplayComponent,
   LightData,
   MaterialData,
+  ModelAssetDiagnostics,
+  ModelAssetRecord,
   PrimitiveType,
   ProjectDocument,
   SceneNode,
@@ -65,7 +67,7 @@ export const BUILT_IN_ASSETS: StudioAsset[] = [
 
 export function createStarterProject(): ProjectDocument {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: createProjectId(),
     name: 'Starter Project',
     sceneName: 'MainWorld',
@@ -81,6 +83,7 @@ export function createStarterProject(): ProjectDocument {
       gridDivisions: 30,
       shadows: true,
     },
+    assets: [],
     nodes: [
       {
         id: 'scene-root',
@@ -317,6 +320,49 @@ export function addPrimitive(
   return { project: next, nodeId };
 }
 
+function nextModelInstanceName(project: ProjectDocument, asset: ModelAssetRecord) {
+  const count = project.nodes.filter((node) => node.kind === 'model' && node.model?.assetId === asset.id).length;
+  return count === 0 ? asset.name : `${asset.name} ${count + 1}`;
+}
+
+export function addModelInstance(
+  project: ProjectDocument,
+  assetId: string,
+  parentId: string | null = 'scene-root',
+): { project: ProjectDocument; nodeId: string } | null {
+  const asset = project.assets.find((entry) => entry.id === assetId);
+  if (!asset) return null;
+  const next = cloneProject(project);
+  const nodeId = createNodeId('model');
+  next.nodes.push({
+    id: nodeId,
+    name: nextModelInstanceName(project, asset),
+    kind: 'model',
+    parentId,
+    visible: true,
+    locked: false,
+    transform: transform(),
+    model: { assetId, fitMode: 'fit', targetSize: 2.5 },
+    castShadow: true,
+    receiveShadow: true,
+    components: [],
+  });
+  next.updatedAt = new Date().toISOString();
+  return { project: next, nodeId };
+}
+
+export function addModelAsset(
+  project: ProjectDocument,
+  asset: ModelAssetRecord,
+  parentId: string | null = 'scene-root',
+): { project: ProjectDocument; nodeId: string } {
+  const next = cloneProject(project);
+  next.assets.push(structuredClone(asset));
+  const instance = addModelInstance(next, asset.id, parentId);
+  if (!instance) throw new Error(`Could not create an instance for model asset ${asset.id}.`);
+  return instance;
+}
+
 export function duplicateNode(
   project: ProjectDocument,
   id: string,
@@ -399,7 +445,7 @@ export type LoadProjectDocumentResult =
   | { ok: true; project: ProjectDocument; warnings: string[] }
   | { ok: false; errors: string[] };
 
-const nodeKinds = ['group', 'mesh', 'light', 'camera'] as const;
+const nodeKinds = ['group', 'mesh', 'model', 'light', 'camera'] as const;
 const primitives = ['box', 'sphere', 'capsule', 'cylinder', 'cone', 'plane', 'torus'] as const;
 const axes = ['x', 'y', 'z'] as const;
 
@@ -423,6 +469,13 @@ function booleanAt(record: UnknownRecord, key: string, path: string, errors: str
   const value = record[key];
   if (typeof value === 'boolean') return value;
   errors.push(`${path} must be a boolean.`);
+  return fallback;
+}
+
+function integerAt(record: UnknownRecord, key: string, path: string, errors: string[], fallback = 0) {
+  const value = record[key];
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return value;
+  errors.push(`${path} must be a non-negative integer.`);
   return fallback;
 }
 
@@ -496,6 +549,75 @@ function normalizeCamera(value: unknown, path: string, errors: string[]): Camera
     near: numberAt(value, 'near', `${path}.near`, errors, 0.1),
     far: numberAt(value, 'far', `${path}.far`, errors, 200),
     primary: booleanAt(value, 'primary', `${path}.primary`, errors),
+  };
+}
+
+function normalizeModelAsset(value: unknown, path: string, errors: string[]): ModelAssetRecord | null {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object.`);
+    return null;
+  }
+  if (value.kind !== 'model') errors.push(`${path}.kind must be "model".`);
+  const diagnosticsValue = value.diagnostics;
+  if (!isRecord(diagnosticsValue)) errors.push(`${path}.diagnostics must be an object.`);
+  const diagnosticsRecord = isRecord(diagnosticsValue) ? diagnosticsValue : {};
+  const boundsValue = diagnosticsRecord.bounds;
+  if (!isRecord(boundsValue)) errors.push(`${path}.diagnostics.bounds must be an object.`);
+  const boundsRecord = isRecord(boundsValue) ? boundsValue : {};
+  const animationNamesValue = diagnosticsRecord.animationNames;
+  if (!Array.isArray(animationNamesValue) || !animationNamesValue.every((entry) => typeof entry === 'string')) {
+    errors.push(`${path}.diagnostics.animationNames must be an array of strings.`);
+  }
+  const warningsValue = diagnosticsRecord.warnings;
+  if (!Array.isArray(warningsValue) || !warningsValue.every((entry) => typeof entry === 'string')) {
+    errors.push(`${path}.diagnostics.warnings must be an array of strings.`);
+  }
+  const diagnostics: ModelAssetDiagnostics = {
+    meshes: integerAt(diagnosticsRecord, 'meshes', `${path}.diagnostics.meshes`, errors),
+    triangles: integerAt(diagnosticsRecord, 'triangles', `${path}.diagnostics.triangles`, errors),
+    materials: integerAt(diagnosticsRecord, 'materials', `${path}.diagnostics.materials`, errors),
+    textures: integerAt(diagnosticsRecord, 'textures', `${path}.diagnostics.textures`, errors),
+    animationNames: Array.isArray(animationNamesValue)
+      ? animationNamesValue.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+    bounds: {
+      min: vec3At(boundsRecord.min, `${path}.diagnostics.bounds.min`, errors, [0, 0, 0]),
+      max: vec3At(boundsRecord.max, `${path}.diagnostics.bounds.max`, errors, [0, 0, 0]),
+      size: vec3At(boundsRecord.size, `${path}.diagnostics.bounds.size`, errors, [0, 0, 0]),
+      center: vec3At(boundsRecord.center, `${path}.diagnostics.bounds.center`, errors, [0, 0, 0]),
+    },
+    warnings: Array.isArray(warningsValue)
+      ? warningsValue.filter((entry): entry is string => typeof entry === 'string')
+      : [],
+  };
+  const revision = integerAt(value, 'revision', `${path}.revision`, errors, 1);
+  if (revision < 1) errors.push(`${path}.revision must be at least 1.`);
+  return {
+    id: stringAt(value, 'id', `${path}.id`, errors),
+    kind: 'model',
+    name: stringAt(value, 'name', `${path}.name`, errors, 'Untitled Model'),
+    sourceFilename: stringAt(value, 'sourceFilename', `${path}.sourceFilename`, errors),
+    mimeType: stringAt(value, 'mimeType', `${path}.mimeType`, errors),
+    byteLength: integerAt(value, 'byteLength', `${path}.byteLength`, errors),
+    revision: Math.max(1, revision),
+    importedAt: stringAt(value, 'importedAt', `${path}.importedAt`, errors),
+    diagnostics,
+  };
+}
+
+function normalizeModelInstance(value: unknown, path: string, errors: string[]): SceneNode['model'] {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object for model nodes.`);
+    return undefined;
+  }
+  const fitMode = value.fitMode;
+  if (fitMode !== 'fit' && fitMode !== 'original') errors.push(`${path}.fitMode must be "fit" or "original".`);
+  const targetSize = numberAt(value, 'targetSize', `${path}.targetSize`, errors, 2.5);
+  if (targetSize <= 0) errors.push(`${path}.targetSize must be greater than 0.`);
+  return {
+    assetId: stringAt(value, 'assetId', `${path}.assetId`, errors),
+    fitMode: fitMode === 'original' ? 'original' : 'fit',
+    targetSize: Math.max(0.001, targetSize),
   };
 }
 
@@ -589,17 +711,27 @@ function migrateVersionOne(value: UnknownRecord, warnings: string[]): UnknownRec
   return migrated;
 }
 
+function migrateVersionTwo(value: UnknownRecord, warnings: string[]): UnknownRecord {
+  const migrated = structuredClone(value) as UnknownRecord;
+  migrated.schemaVersion = 3;
+  if (!Array.isArray(migrated.assets)) migrated.assets = [];
+  warnings.push('Migrated project schema from v2 to v3 and initialized the model asset catalog.');
+  return migrated;
+}
+
 export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
   if (!isRecord(value)) return { ok: false, errors: ['Project must be a JSON object.'] };
-  if (typeof value.schemaVersion === 'number' && value.schemaVersion > 2) {
+  if (typeof value.schemaVersion === 'number' && value.schemaVersion > 3) {
     return { ok: false, errors: [`Project schema v${value.schemaVersion} is newer than this editor supports.`] };
   }
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2) {
-    return { ok: false, errors: ['schemaVersion must be 1 or 2.'] };
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3) {
+    return { ok: false, errors: ['schemaVersion must be 1, 2, or 3.'] };
   }
 
   const warnings: string[] = [];
-  const source = value.schemaVersion === 1 ? migrateVersionOne(value, warnings) : structuredClone(value) as UnknownRecord;
+  let source = structuredClone(value) as UnknownRecord;
+  if (source.schemaVersion === 1) source = migrateVersionOne(source, warnings);
+  if (source.schemaVersion === 2) source = migrateVersionTwo(source, warnings);
   const errors: string[] = [];
   const settingsValue = source.settings;
   if (!isRecord(settingsValue)) errors.push('settings must be an object.');
@@ -627,6 +759,17 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
     gridDivisions: Math.round(clampWithWarning(numberAt(settingsRecord, 'gridDivisions', 'settings.gridDivisions', errors, 30), 1, 1000, 'settings.gridDivisions', warnings)),
     shadows: booleanAt(settingsRecord, 'shadows', 'settings.shadows', errors, true),
   };
+
+  const assetsValue = source.assets;
+  if (!Array.isArray(assetsValue)) errors.push('assets must be an array.');
+  const usedAssetIds = new Set<string>();
+  const assets: ModelAssetRecord[] = (Array.isArray(assetsValue) ? assetsValue : []).flatMap((entry, index) => {
+    const asset = normalizeModelAsset(entry, `assets[${index}]`, errors);
+    if (!asset) return [];
+    if (usedAssetIds.has(asset.id)) errors.push(`assets[${index}].id duplicates asset id "${asset.id}".`);
+    usedAssetIds.add(asset.id);
+    return [asset];
+  });
 
   const nodesValue = source.nodes;
   if (!Array.isArray(nodesValue)) errors.push('nodes must be an array.');
@@ -671,6 +814,10 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
       node.material = normalizeMaterial(entry.material, `${path}.material`, errors);
       if (entry.castShadow !== undefined) node.castShadow = booleanAt(entry, 'castShadow', `${path}.castShadow`, errors);
       if (entry.receiveShadow !== undefined) node.receiveShadow = booleanAt(entry, 'receiveShadow', `${path}.receiveShadow`, errors);
+    } else if (kind === 'model') {
+      node.model = normalizeModelInstance(entry.model, `${path}.model`, errors);
+      if (entry.castShadow !== undefined) node.castShadow = booleanAt(entry, 'castShadow', `${path}.castShadow`, errors);
+      if (entry.receiveShadow !== undefined) node.receiveShadow = booleanAt(entry, 'receiveShadow', `${path}.receiveShadow`, errors);
     } else if (kind === 'light') {
       node.light = normalizeLight(entry.light, `${path}.light`, errors);
     } else if (kind === 'camera') {
@@ -681,6 +828,9 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
 
   for (const [index, node] of nodes.entries()) {
     if (node.parentId && !usedNodeIds.has(node.parentId)) errors.push(`nodes[${index}].parentId references missing node "${node.parentId}".`);
+    if (node.kind === 'model' && node.model && !usedAssetIds.has(node.model.assetId)) {
+      errors.push(`nodes[${index}].model.assetId references missing asset "${node.model.assetId}".`);
+    }
   }
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   for (const [index, node] of nodes.entries()) {
@@ -707,19 +857,20 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
     ok: true,
     warnings,
     project: {
-      schemaVersion: 2,
+      schemaVersion: 3,
       id,
       name,
       sceneName,
       updatedAt,
       settings,
+      assets,
       nodes,
     },
   };
 }
 
 export function isProjectDocument(value: unknown): value is ProjectDocument {
-  if (!isRecord(value) || value.schemaVersion !== 2 || !Array.isArray(value.nodes) || !isRecord(value.settings)) return false;
+  if (!isRecord(value) || value.schemaVersion !== 3 || !Array.isArray(value.assets) || !Array.isArray(value.nodes) || !isRecord(value.settings)) return false;
   const result = loadProjectDocument(value);
   return (
     typeof value.name === 'string' &&
@@ -740,8 +891,9 @@ export function downloadTextFile(contents: string, filename: string, type = 'app
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function buildRuntimeHtml(project: ProjectDocument): string {
+export function buildRuntimeHtml(project: ProjectDocument, embeddedAssets: Record<string, string> = {}): string {
   const serialized = JSON.stringify(project).replaceAll('<', '\\u003c');
+  const serializedAssets = JSON.stringify(embeddedAssets).replaceAll('<', '\\u003c');
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -759,51 +911,76 @@ export function buildRuntimeHtml(project: ProjectDocument): string {
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
     const project = ${serialized};
-    const renderer = new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});
-    renderer.setPixelRatio(Math.min(devicePixelRatio,2));
-    renderer.setSize(innerWidth,innerHeight);
-    renderer.shadowMap.enabled=project.settings.shadows;
-    renderer.shadowMap.type=THREE.PCFShadowMap;
-    renderer.outputColorSpace=THREE.SRGBColorSpace;
-    renderer.toneMapping=THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure=project.settings.exposure;
-    document.body.prepend(renderer.domElement);
-    const scene=new THREE.Scene();
-    scene.background=new THREE.Color(project.settings.background);
-    scene.fog=project.settings.fogEnabled?new THREE.Fog(project.settings.fogColor,project.settings.fogNear,project.settings.fogFar):null;
-    scene.add(new THREE.HemisphereLight(0xbfd9ff,0x1a2028,1.15));
-    const objects=new Map();
-    const makeGeometry=(kind)=>({box:()=>new THREE.BoxGeometry(),sphere:()=>new THREE.SphereGeometry(.5,40,24),capsule:()=>new THREE.CapsuleGeometry(.5,1,8,24),cylinder:()=>new THREE.CylinderGeometry(.5,.5,1,32),cone:()=>new THREE.ConeGeometry(.55,1,32),plane:()=>new THREE.PlaneGeometry(1,1),torus:()=>new THREE.TorusGeometry(.6,.12,18,48)}[kind]());
-    for(const node of project.nodes){
-      const root=new THREE.Group(); root.name=node.name; root.userData.node=node; root.userData.move=[0,0,0]; objects.set(node.id,root);
-      if(node.kind==='mesh'){
-        const m=node.material; const mat=new THREE.MeshStandardMaterial({color:m.color,roughness:m.roughness,metalness:m.metalness,emissive:m.emissive,emissiveIntensity:m.emissiveIntensity});
-        const mesh=new THREE.Mesh(makeGeometry(node.primitive),mat); mesh.castShadow=!!node.castShadow; mesh.receiveShadow=!!node.receiveShadow; root.add(mesh);
+    const embeddedAssets = ${serializedAssets};
+    async function boot(){
+      const renderer = new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});
+      renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+      renderer.setSize(innerWidth,innerHeight);
+      renderer.shadowMap.enabled=project.settings.shadows;
+      renderer.shadowMap.type=THREE.PCFShadowMap;
+      renderer.outputColorSpace=THREE.SRGBColorSpace;
+      renderer.toneMapping=THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure=project.settings.exposure;
+      document.body.prepend(renderer.domElement);
+      const scene=new THREE.Scene();
+      scene.background=new THREE.Color(project.settings.background);
+      scene.fog=project.settings.fogEnabled?new THREE.Fog(project.settings.fogColor,project.settings.fogNear,project.settings.fogFar):null;
+      scene.add(new THREE.HemisphereLight(0xbfd9ff,0x1a2028,1.15));
+      const referencedAssets=new Set(project.nodes.filter(node=>node.kind==='model'&&node.model).map(node=>node.model.assetId));
+      const modelCache=new Map();
+      const loader=new GLTFLoader();
+      await Promise.all(project.assets.filter(asset=>referencedAssets.has(asset.id)).map(async asset=>{
+        const source=embeddedAssets[asset.id];
+        if(!source) throw new Error('Missing embedded model: '+asset.name);
+        modelCache.set(asset.id,await loader.loadAsync(source));
+      }));
+      const objects=new Map();
+      const makeGeometry=(kind)=>({box:()=>new THREE.BoxGeometry(),sphere:()=>new THREE.SphereGeometry(.5,40,24),capsule:()=>new THREE.CapsuleGeometry(.5,1,8,24),cylinder:()=>new THREE.CylinderGeometry(.5,.5,1,32),cone:()=>new THREE.ConeGeometry(.55,1,32),plane:()=>new THREE.PlaneGeometry(1,1),torus:()=>new THREE.TorusGeometry(.6,.12,18,48)}[kind]());
+      for(const node of project.nodes){
+        const root=new THREE.Group(); root.name=node.name; root.userData.node=node; root.userData.move=[0,0,0]; objects.set(node.id,root);
+        if(node.kind==='mesh'){
+          const m=node.material; const mat=new THREE.MeshStandardMaterial({color:m.color,roughness:m.roughness,metalness:m.metalness,emissive:m.emissive,emissiveIntensity:m.emissiveIntensity});
+          const mesh=new THREE.Mesh(makeGeometry(node.primitive),mat); mesh.castShadow=!!node.castShadow; mesh.receiveShadow=!!node.receiveShadow; root.add(mesh);
+        }
+        if(node.kind==='model'&&node.model){
+          const asset=project.assets.find(entry=>entry.id===node.model.assetId); const loaded=modelCache.get(node.model.assetId);
+          if(asset&&loaded){
+            const instance=cloneSkeleton(loaded.scene); instance.traverse(child=>{if(child.isMesh){child.castShadow=!!node.castShadow;child.receiveShadow=!!node.receiveShadow}});
+            const host=new THREE.Group(); host.add(instance);
+            if(node.model.fitMode==='fit'){
+              const bounds=asset.diagnostics.bounds; const largest=Math.max(...bounds.size,.0001); const scale=node.model.targetSize/largest;
+              host.scale.setScalar(scale); host.position.set(-bounds.center[0]*scale,-bounds.min[1]*scale,-bounds.center[2]*scale);
+            }
+            root.add(host);
+          }
+        }
+        if(node.kind==='light'){
+          const l=node.light; let light;
+          if(l.type==='directional') light=new THREE.DirectionalLight(l.color,l.intensity); else if(l.type==='spot') light=new THREE.SpotLight(l.color,l.intensity,l.distance,Math.PI/5,.35,1.4); else light=new THREE.PointLight(l.color,l.intensity,l.distance,2);
+          light.castShadow=l.castShadow; root.add(light);
+        }
+        if(node.kind==='camera'){
+          const c=node.camera; const cam=new THREE.PerspectiveCamera(c.fov,innerWidth/innerHeight,c.near,c.far); cam.userData.primary=c.primary; root.add(cam);
+        }
+        root.position.fromArray(node.transform.position); root.rotation.fromArray([...node.transform.rotation,'XYZ']); root.scale.fromArray(node.transform.scale); root.visible=node.visible;
       }
-      if(node.kind==='light'){
-        const l=node.light; let light;
-        if(l.type==='directional') light=new THREE.DirectionalLight(l.color,l.intensity); else if(l.type==='spot') light=new THREE.SpotLight(l.color,l.intensity, l.distance, Math.PI/5,.35,1.4); else light=new THREE.PointLight(l.color,l.intensity,l.distance,2);
-        light.castShadow=l.castShadow; root.add(light);
-      }
-      if(node.kind==='camera'){
-        const c=node.camera; const cam=new THREE.PerspectiveCamera(c.fov,innerWidth/innerHeight,c.near,c.far); cam.userData.primary=c.primary; root.add(cam);
-      }
-      root.position.fromArray(node.transform.position); root.rotation.fromArray([...node.transform.rotation,'XYZ']); root.scale.fromArray(node.transform.scale); root.visible=node.visible;
+      for(const node of project.nodes){const object=objects.get(node.id);const parent=node.parentId?objects.get(node.parentId):scene;parent.add(object)}
+      let camera;
+      for(const root of objects.values()){const candidate=root.children.find(child=>child.isPerspectiveCamera&&child.userData.primary);if(candidate){camera=candidate;break}}
+      if(!camera){camera=new THREE.PerspectiveCamera(48,innerWidth/innerHeight,.1,200);camera.position.set(9,6.5,11);camera.lookAt(0,1,0)}
+      camera.updateMatrixWorld(true);
+      const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.target.set(0,1.2,0);
+      const clock=new THREE.Clock();
+      const keys=new Set();const moveKeys=new Set(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright']);
+      addEventListener('keydown',event=>{const key=event.key.toLowerCase();if(moveKeys.has(key)){keys.add(key);event.preventDefault()}});
+      addEventListener('keyup',event=>keys.delete(event.key.toLowerCase()));addEventListener('blur',()=>keys.clear());
+      function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const node=root.userData.node;const move=root.userData.move;for(const component of node.components){if(!component.enabled||component.type!=='keyboardMove')continue;let horizontal=(keys.has('d')||keys.has('arrowright')?1:0)-(keys.has('a')||keys.has('arrowleft')?1:0);let vertical=(keys.has('w')||keys.has('arrowup')?1:0)-(keys.has('s')||keys.has('arrowdown')?1:0);const length=Math.hypot(horizontal,vertical)||1;horizontal/=length;vertical/=length;move[0]+=horizontal*component.speed*dt;if(component.plane==='xy')move[1]+=vertical*component.speed*dt;else move[2]-=vertical*component.speed*dt}root.position.fromArray(node.transform.position);root.position.x+=move[0];root.position.y+=move[1];root.position.z+=move[2];root.rotation.fromArray([...node.transform.rotation,'XYZ']);root.scale.fromArray(node.transform.scale);for(const component of node.components){if(!component.enabled)continue;if(component.type==='rotate')root.rotation[component.axis]+=t*component.speed;else if(component.type==='float')root.position[component.axis]+=Math.sin(t*component.speed*2+component.phase)*component.distance}}controls.update();renderer.render(scene,camera)}
+      addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});frame();
     }
-    for(const node of project.nodes){const obj=objects.get(node.id); const parent=node.parentId?objects.get(node.parentId):scene; parent.add(obj);}
-    let camera;
-    for(const root of objects.values()){const c=root.children.find(child=>child.isPerspectiveCamera&&child.userData.primary); if(c){camera=c;break}}
-    if(!camera){camera=new THREE.PerspectiveCamera(48,innerWidth/innerHeight,.1,200);camera.position.set(9,6.5,11);camera.lookAt(0,1,0)}
-    camera.updateMatrixWorld(true);
-    const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.target.set(0,1.2,0);
-    const clock=new THREE.Clock();
-    const keys=new Set();const moveKeys=new Set(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright']);
-    addEventListener('keydown',(event)=>{const key=event.key.toLowerCase();if(moveKeys.has(key)){keys.add(key);event.preventDefault()}});
-    addEventListener('keyup',(event)=>keys.delete(event.key.toLowerCase()));
-    addEventListener('blur',()=>keys.clear());
-    function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const n=root.userData.node;const move=root.userData.move;for(const component of n.components){if(!component.enabled||component.type!=='keyboardMove')continue;let horizontal=(keys.has('d')||keys.has('arrowright')?1:0)-(keys.has('a')||keys.has('arrowleft')?1:0);let vertical=(keys.has('w')||keys.has('arrowup')?1:0)-(keys.has('s')||keys.has('arrowdown')?1:0);const length=Math.hypot(horizontal,vertical)||1;horizontal/=length;vertical/=length;move[0]+=horizontal*component.speed*dt;if(component.plane==='xy')move[1]+=vertical*component.speed*dt;else move[2]-=vertical*component.speed*dt}root.position.fromArray(n.transform.position);root.position.x+=move[0];root.position.y+=move[1];root.position.z+=move[2];root.rotation.fromArray([...n.transform.rotation,'XYZ']);root.scale.fromArray(n.transform.scale);for(const component of n.components){if(!component.enabled)continue;if(component.type==='rotate')root.rotation[component.axis]+=t*component.speed;else if(component.type==='float')root.position[component.axis]+=Math.sin(t*component.speed*2+component.phase)*component.distance}}controls.update();renderer.render(scene,camera)}
-    addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});frame();
+    boot().catch(error=>{document.querySelector('.badge').textContent='Build could not start · '+error.message;console.error(error)});
   </script>
 </body>
 </html>`;

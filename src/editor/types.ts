@@ -9,7 +9,7 @@ export type PrimitiveType =
   | 'plane'
   | 'torus';
 
-export type NodeKind = 'group' | 'mesh' | 'light' | 'camera';
+export type NodeKind = 'group' | 'mesh' | 'model' | 'light' | 'camera';
 
 export interface TransformData {
   position: Vec3;
@@ -72,6 +72,39 @@ export type GameplayComponent =
   | FloatGameplayComponent
   | KeyboardMoveGameplayComponent;
 
+export interface ModelAssetDiagnostics {
+  meshes: number;
+  triangles: number;
+  materials: number;
+  textures: number;
+  animationNames: string[];
+  bounds: {
+    min: Vec3;
+    max: Vec3;
+    size: Vec3;
+    center: Vec3;
+  };
+  warnings: string[];
+}
+
+export interface ModelAssetRecord {
+  id: string;
+  kind: 'model';
+  name: string;
+  sourceFilename: string;
+  mimeType: string;
+  byteLength: number;
+  revision: number;
+  importedAt: string;
+  diagnostics: ModelAssetDiagnostics;
+}
+
+export interface ModelInstanceData {
+  assetId: string;
+  fitMode: 'fit' | 'original';
+  targetSize: number;
+}
+
 export interface SceneNode {
   id: string;
   name: string;
@@ -82,6 +115,7 @@ export interface SceneNode {
   transform: TransformData;
   primitive?: PrimitiveType;
   material?: MaterialData;
+  model?: ModelInstanceData;
   light?: LightData;
   camera?: CameraData;
   components: GameplayComponent[];
@@ -102,12 +136,13 @@ export interface ProjectSettings {
 }
 
 export interface ProjectDocument {
-  schemaVersion: 2;
+  schemaVersion: 3;
   id: string;
   name: string;
   sceneName: string;
   updatedAt: string;
   settings: ProjectSettings;
+  assets: ModelAssetRecord[];
   nodes: SceneNode[];
 }
 
@@ -124,7 +159,14 @@ export interface RendererStats {
   textures: number;
 }
 
-export type AssetKind = 'scene' | 'primitive' | 'material';
+export type AssetKind = 'scene' | 'primitive' | 'material' | 'model';
+
+export type AssetLoadState = 'checking' | 'loading' | 'ready' | 'missing' | 'error';
+
+export interface AssetStatus {
+  state: AssetLoadState;
+  message?: string;
+}
 
 export interface StudioAsset {
   id: string;
@@ -132,6 +174,7 @@ export interface StudioAsset {
   kind: AssetKind;
   primitive?: PrimitiveType;
   color?: string;
+  modelAsset?: ModelAssetRecord;
   meta: string;
 }
 

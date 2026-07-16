@@ -44,8 +44,33 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { AgentPanel, type AssistantMessage, type AssistantPlan } from './editor/AgentPanel';
 import { BottomDock, HierarchyPanel, IconButton, InspectorPanel, primitiveLabel } from './editor/components';
 import {
+  executeAgentToolBatch,
+  guidedStudioAgentProvider,
+  type StudioAgentBatchResult,
+  type StudioAgentToolCall,
+} from './editor/agentRuntime';
+import {
+  AGENT_CAPABILITY_MANIFEST,
+  assessAgentToolCall,
+  getAgentToolDefinition,
+  validateAgentToolArguments,
+  type AgentToolName,
+} from './editor/agentTools';
+import {
+  createPortableProjectBundle,
+  deleteModelAssetSource,
+  getModelAssetSource,
+  putModelAssetSource,
+  readPortableProjectBundle,
+  sourceToDataUrl,
+} from './editor/assetStore';
+import { analyzeModelFile, formatTriangles } from './editor/modelAssets';
+import {
+  addModelAsset,
+  addModelInstance,
   addPrimitive,
   applyMaterial,
   buildRuntimeHtml,
@@ -61,9 +86,11 @@ import {
   updateNode,
 } from './editor/project';
 import type {
+  AssetStatus,
   ConsoleEntry,
   EditorMode,
   EditorTool,
+  ModelAssetRecord,
   PrimitiveType,
   ProjectDocument,
   ProjectSettings,
@@ -74,8 +101,8 @@ import type {
 } from './editor/types';
 import { ViewportEngine } from './editor/ViewportEngine';
 
-const STORAGE_KEY = 'threejs-game-studio:project:v2';
-const LEGACY_STORAGE_KEY = 'threejs-game-studio:project:v1';
+const STORAGE_KEY = 'threejs-game-studio:project:v3';
+const LEGACY_STORAGE_KEYS = ['threejs-game-studio:project:v2', 'threejs-game-studio:project:v1'];
 const EXPERIENCE_KEY = 'threejs-game-studio:experience';
 const QUICK_START_KEY = 'threejs-game-studio:quick-start';
 const MAX_HISTORY = 60;
@@ -114,14 +141,37 @@ interface CommandAction {
   run: () => void;
 }
 
+interface PendingAssistantPlan extends AssistantPlan {
+  baseRevision: number;
+  source: 'guided' | 'bridge';
+  toolCalls: StudioAgentToolCall[];
+  batch?: StudioAgentBatchResult;
+}
+
+interface EditorToolExecutionResult {
+  ok: boolean;
+  changed: boolean;
+  message: string;
+  errors: string[];
+  data?: unknown;
+}
+
+interface AssistantCommitMarker {
+  revision: number;
+  label: string;
+  actor: EditorActor;
+}
+
+type EditorActor = NonNullable<ThreeGameStudioAgentEvent['actor']>;
+
 function loadInitialProject() {
-  for (const key of [STORAGE_KEY, LEGACY_STORAGE_KEY]) {
+  for (const key of [STORAGE_KEY, ...LEGACY_STORAGE_KEYS]) {
     try {
       const saved = localStorage.getItem(key);
       if (saved) {
         const result = loadProjectDocument(JSON.parse(saved) as unknown);
         if (result.ok) {
-          if (key === LEGACY_STORAGE_KEY) localStorage.setItem(STORAGE_KEY, JSON.stringify(result.project));
+          if (key !== STORAGE_KEY) localStorage.setItem(STORAGE_KEY, JSON.stringify(result.project));
           return result.project;
         }
       }
@@ -169,6 +219,31 @@ function safeFilename(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'threejs-game';
 }
 
+function modelDisplayName(filename: string) {
+  const withoutExtension = filename.replace(/\.(?:glb|gltf)$/i, '');
+  const cleaned = withoutExtension.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return cleaned ? cleaned.replace(/\b\w/g, (character) => character.toUpperCase()) : 'Imported Model';
+}
+
+function assistantId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function summarizeAgentBatch(batch: StudioAgentBatchResult) {
+  const result = batch.results.at(-1);
+  const data = result?.data as Record<string, unknown> | undefined;
+  const totals = data?.totals as { nodes?: number; assets?: number; components?: number } | undefined;
+  if (totals) {
+    return `${result?.message ?? 'Project inspected'} It contains ${totals.nodes ?? 0} scene objects, ${totals.assets ?? 0} imported model assets, and ${totals.components ?? 0} gameplay components.`;
+  }
+  const nodes = data?.nodes as Array<{ name?: string; kind?: string }> | undefined;
+  if (nodes) {
+    const preview = nodes.slice(0, 10).map((node) => `${node.name ?? 'Unnamed'} (${node.kind ?? 'node'})`).join(', ');
+    return `${result?.message ?? `Found ${nodes.length} nodes`}${preview ? ` ${preview}${nodes.length > 10 ? ', …' : ''}` : ''}`;
+  }
+  return batch.messages.join('\n') || 'The tool call completed.';
+}
+
 function MenuItem({ icon, label, shortcut, disabled, danger, onClick }: MenuItemProps) {
   return (
     <button type="button" className={`menu-item ${danger ? 'is-danger' : ''}`} disabled={disabled} onClick={onClick}>
@@ -203,6 +278,7 @@ export default function App() {
   const [gridVisible, setGridVisible] = useState(true);
   const [hierarchyOpen, setHierarchyOpen] = useState(() => window.innerWidth > 960);
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 960);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const [bottomOpen, setBottomOpen] = useState(() => experience === 'advanced' && window.innerWidth > 720);
   const [bottomTab, setBottomTab] = useState<'assets' | 'console'>('assets');
   const [previewMode, setPreviewMode] = useState(false);
@@ -215,8 +291,18 @@ export default function App() {
   const [lastSaved, setLastSaved] = useState('Loaded');
   const [toast, setToast] = useState<string | null>('Starter scene ready — add a shape or adjust Player Core.');
   const [stats, setStats] = useState<RendererStats>({ fps: 0, frameMs: 0, drawCalls: 0, triangles: 0, geometries: 0, textures: 0 });
+  const [assetStatuses, setAssetStatuses] = useState<Record<string, AssetStatus>>({});
+  const [modelImportNotice, setModelImportNotice] = useState<{ state: 'loading' | 'error'; message: string } | null>(null);
   const [undoStack, setUndoStack] = useState<HistoryEntry[]>([]);
   const [redoStack, setRedoStack] = useState<HistoryEntry[]>([]);
+  const [projectRevision, setProjectRevision] = useState(1);
+  const projectRevisionRef = useRef(1);
+  const [assistantBusy, setAssistantBusy] = useState(false);
+  const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
+  const [pendingAssistantPlan, setPendingAssistantPlan] = useState<PendingAssistantPlan | null>(null);
+  const pendingAssistantPlanRef = useRef<PendingAssistantPlan | null>(null);
+  const assistantApplyInFlightRef = useRef<string | null>(null);
+  const [lastAssistantCommit, setLastAssistantCommit] = useState<AssistantCommitMarker | null>(null);
   const [consoleEntries, setConsoleEntries] = useState<ConsoleEntry[]>([
     { id: 'boot-1', level: 'success', message: 'Editor runtime initialized', time: nowLabel() },
     { id: 'boot-2', level: 'info', message: 'MainWorld loaded · 13 objects', time: nowLabel() },
@@ -228,10 +314,29 @@ export default function App() {
   const engineRef = useRef<ViewportEngine | null>(null);
   const dragStartRef = useRef<ProjectDocument | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const modelInputRef = useRef<HTMLInputElement | null>(null);
+  const relinkAssetIdRef = useRef<string | null>(null);
+  const assistantSubscribersRef = useRef(new Set<(event: ThreeGameStudioAgentEvent) => void>());
+  const assistantSnapshotRef = useRef<() => unknown>(() => ({ revision: 0 }));
+  const assistantRequestRef = useRef<(request: ThreeGameStudioAgentRequest) => Promise<unknown>>(async () => ({ status: 'unavailable' }));
 
   const selectedNode = getNode(project, selectedId);
   const editingDisabled = mode !== 'edit';
   const quickStartStep = getQuickStartStep(quickStart);
+  const studioAssets = useMemo<StudioAsset[]>(() => [
+    ...BUILT_IN_ASSETS,
+    ...project.assets.map((asset) => ({
+      id: asset.id,
+      name: asset.name,
+      kind: 'model' as const,
+      modelAsset: asset,
+      meta: `${asset.diagnostics.meshes} mesh${asset.diagnostics.meshes === 1 ? '' : 'es'} · ${formatTriangles(asset.diagnostics.triangles)} tris`,
+    })),
+  ], [project.assets]);
+  const modelIssue = project.assets.find((asset) => {
+    const state = assetStatuses[asset.id]?.state;
+    return state === 'missing' || state === 'error';
+  });
 
   const addLog = useCallback((message: string, level: ConsoleEntry['level'] = 'info') => {
     setConsoleEntries((entries) => [
@@ -266,7 +371,24 @@ export default function App() {
     showToast(next === 'essentials' ? 'Essentials keeps the core tools in focus' : 'Advanced tools are now visible');
   }, [showToast]);
 
-  const commitProject = useCallback((next: ProjectDocument, label: string) => {
+  const bumpProjectRevision = useCallback(() => {
+    const next = projectRevisionRef.current + 1;
+    projectRevisionRef.current = next;
+    setProjectRevision(next);
+    return next;
+  }, []);
+
+  const publishAssistantEvent = useCallback((event: ThreeGameStudioAgentEvent) => {
+    for (const subscriber of assistantSubscribersRef.current) {
+      try {
+        subscriber(structuredClone(event));
+      } catch {
+        // Integration listeners are isolated from editor commits and history.
+      }
+    }
+  }, []);
+
+  const commitProject = useCallback((next: ProjectDocument, label: string, actor: EditorActor = 'human') => {
     if (modeRef.current !== 'edit') {
       showToast('Stop Play mode before editing the scene');
       return false;
@@ -277,13 +399,22 @@ export default function App() {
     projectRef.current = next;
     setProject(next);
     setDirty(true);
+    const revision = bumpProjectRevision();
     addLog(label);
+    publishAssistantEvent({ type: 'project.changed', revision, label, actor });
     return true;
-  }, [addLog, showToast]);
+  }, [addLog, bumpProjectRevision, publishAssistantEvent, showToast]);
 
   const updateSceneNode = useCallback((node: SceneNode, label: string) => {
     if (!commitProject(updateNode(projectRef.current, node.id, () => node), label)) return;
-    if (label === 'Change material color' || label.startsWith('Apply ')) markQuickStart('styled');
+    const styledImportedModel = node.kind === 'model' && (
+      label === 'Change position' ||
+      label === 'Change rotation' ||
+      label === 'Change scale' ||
+      label === 'Change model sizing' ||
+      label === 'Change model target size'
+    );
+    if (label === 'Change material color' || label.startsWith('Apply ') || styledImportedModel) markQuickStart('styled');
   }, [commitProject, markQuickStart]);
 
   const updateProjectSettings = useCallback((settings: ProjectSettings, label: string) => {
@@ -293,7 +424,7 @@ export default function App() {
     commitProject(next, label);
   }, [commitProject]);
 
-  const undo = useCallback(() => {
+  const undo = useCallback((actor: EditorActor = 'human') => {
     if (modeRef.current !== 'edit') return;
     const entry = undoStack.at(-1);
     if (!entry) return;
@@ -304,11 +435,13 @@ export default function App() {
     projectRef.current = restored;
     setProject(restored);
     setDirty(true);
+    const revision = bumpProjectRevision();
     if (selectedId && !getNode(restored, selectedId)) setSelectedId(null);
     addLog(`Undo · ${entry.label}`);
-  }, [addLog, selectedId, undoStack]);
+    publishAssistantEvent({ type: 'project.changed', revision, label: `Undo · ${entry.label}`, actor });
+  }, [addLog, bumpProjectRevision, publishAssistantEvent, selectedId, undoStack]);
 
-  const redo = useCallback(() => {
+  const redo = useCallback((actor: EditorActor = 'human') => {
     if (modeRef.current !== 'edit') return;
     const entry = redoStack.at(-1);
     if (!entry) return;
@@ -319,8 +452,10 @@ export default function App() {
     projectRef.current = restored;
     setProject(restored);
     setDirty(true);
+    const revision = bumpProjectRevision();
     addLog(`Redo · ${entry.label}`);
-  }, [addLog, redoStack]);
+    publishAssistantEvent({ type: 'project.changed', revision, label: `Redo · ${entry.label}`, actor });
+  }, [addLog, bumpProjectRevision, publishAssistantEvent, redoStack]);
 
   const createPrimitive = useCallback((primitive: PrimitiveType, color?: string) => {
     if (modeRef.current !== 'edit') return;
@@ -381,24 +516,67 @@ export default function App() {
         addLog('Project saved to this browser', 'success');
         showToast('Project saved locally');
       }
+      return true;
     } catch {
       addLog('Browser storage is unavailable; export a project file instead', 'warning');
       showToast('Could not save locally');
+      return false;
     }
   }, [addLog, showToast]);
 
-  const exportProject = useCallback(() => {
+  const exportProject = useCallback(async (requestedFilename?: string) => {
     const current = projectRef.current;
-    downloadTextFile(JSON.stringify(current, null, 2), `${safeFilename(current.name)}.tjsstudio.json`);
-    addLog('Editable project package exported', 'success');
-    showToast('Project file exported');
+    try {
+      const { bundle, missingAssetIds } = await createPortableProjectBundle(current);
+      downloadTextFile(JSON.stringify(bundle, null, 2), requestedFilename?.trim() || `${safeFilename(current.name)}.tjsstudio.json`);
+      if (missingAssetIds.length) {
+        addLog(`Project exported with ${missingAssetIds.length} missing model file${missingAssetIds.length === 1 ? '' : 's'}`, 'warning');
+        showToast('Project exported · relink missing models before sharing');
+        return { ok: true, message: `Project exported with ${missingAssetIds.length} missing model source${missingAssetIds.length === 1 ? '' : 's'}.` };
+      } else {
+        addLog('Editable project package exported with local models', 'success');
+        showToast('Project package exported');
+        return { ok: true, message: 'Editable project package exported with available model sources.' };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not package the project';
+      addLog(`Project export failed · ${message}`, 'warning');
+      showToast(`Project export failed · ${message}`);
+      return { ok: false, message };
+    }
   }, [addLog, showToast]);
 
-  const buildWebGame = useCallback(() => {
+  const buildWebGame = useCallback(async (requestedFilename?: string) => {
     const current = projectRef.current;
-    downloadTextFile(buildRuntimeHtml(current), `${safeFilename(current.name)}-web.html`, 'text/html');
-    addLog('Standalone web build generated', 'success');
-    showToast('Web game built · single HTML file');
+    try {
+      const referencedAssetIds = new Set(
+        current.nodes.flatMap((node) => node.kind === 'model' && node.model ? [node.model.assetId] : []),
+      );
+      const embeddedAssets: Record<string, string> = {};
+      const missing: string[] = [];
+      for (const assetId of referencedAssetIds) {
+        const asset = current.assets.find((entry) => entry.id === assetId);
+        if (!asset) {
+          missing.push(assetId);
+          continue;
+        }
+        const source = await getModelAssetSource(current.id, asset.id, asset.revision);
+        if (!source) missing.push(asset.name);
+        else embeddedAssets[asset.id] = sourceToDataUrl(source);
+      }
+      if (missing.length) {
+        throw new Error(`Relink ${missing.join(', ')} before building.`);
+      }
+      downloadTextFile(buildRuntimeHtml(current, embeddedAssets), requestedFilename?.trim() || `${safeFilename(current.name)}-web.html`, 'text/html');
+      addLog('Single-file web build generated with embedded models', 'success');
+      showToast('Web game built · models included');
+      return { ok: true, message: 'Single-file web build generated with embedded model sources.' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not build the web game';
+      addLog(`Build failed · ${message}`, 'warning');
+      showToast(`Build failed · ${message}`);
+      return { ok: false, message };
+    }
   }, [addLog, showToast]);
 
   const startPlay = useCallback(() => {
@@ -428,6 +606,7 @@ export default function App() {
 
   const enterPreview = useCallback(() => {
     if (modeRef.current !== 'edit') return;
+    setAssistantOpen(false);
     setPreviewMode(true);
     setViewMode('game');
     modeRef.current = 'play';
@@ -438,6 +617,16 @@ export default function App() {
 
   const activateAsset = useCallback((asset: StudioAsset) => {
     if (modeRef.current !== 'edit') return;
+    if (asset.kind === 'model' && asset.modelAsset) {
+      const selected = getNode(projectRef.current, selectedId);
+      const parentId = selected?.kind === 'group' ? selected.id : 'scene-root';
+      const result = addModelInstance(projectRef.current, asset.modelAsset.id, parentId);
+      if (!result || !commitProject(result.project, `Add ${asset.modelAsset.name} instance`)) return;
+      setSelectedId(result.nodeId);
+      markQuickStart('added');
+      showToast(`${asset.modelAsset.name} added to the scene`);
+      return;
+    }
     if (asset.kind === 'primitive' && asset.primitive) {
       createPrimitive(asset.primitive, asset.color);
       return;
@@ -457,16 +646,130 @@ export default function App() {
     showToast('MainWorld is already the active scene');
   }, [commitProject, createPrimitive, markQuickStart, selectedId, showToast]);
 
+  const openModelPicker = useCallback((assetId?: string) => {
+    if (modeRef.current !== 'edit') {
+      showToast('Stop Play mode before importing a model');
+      return;
+    }
+    relinkAssetIdRef.current = assetId ?? null;
+    modelInputRef.current?.click();
+  }, [showToast]);
+
+  const handleModelImport = useCallback(async (file: File | undefined, relinkAssetId: string | null) => {
+    if (!file || modeRef.current !== 'edit') return;
+    setModelImportNotice({
+      state: 'loading',
+      message: relinkAssetId ? `Checking ${file.name} before relinking…` : `Checking ${file.name}…`,
+    });
+    let stored: { projectId: string; assetId: string; revision: number } | null = null;
+    let committed = false;
+    try {
+      const { source, diagnostics } = await analyzeModelFile(file);
+      const current = projectRef.current;
+
+      if (relinkAssetId) {
+        const existing = current.assets.find((asset) => asset.id === relinkAssetId);
+        if (!existing) throw new Error('This model asset is no longer part of the project.');
+        const revision = existing.revision + 1;
+        await putModelAssetSource(current.id, existing.id, revision, source);
+        stored = { projectId: current.id, assetId: existing.id, revision };
+        const latest = projectRef.current.assets.find((asset) => asset.id === existing.id);
+        if (!latest || latest.revision !== existing.revision) {
+          throw new Error('The model changed while the replacement file was being checked. Try relinking again.');
+        }
+        const next = cloneProject(projectRef.current);
+        next.assets = next.assets.map((asset) => asset.id === existing.id ? {
+          ...asset,
+          sourceFilename: source.fileName,
+          mimeType: source.mimeType,
+          byteLength: source.byteLength,
+          revision,
+          importedAt: new Date().toISOString(),
+          diagnostics,
+        } : asset);
+        next.updatedAt = new Date().toISOString();
+        if (!commitProject(next, `Relink ${existing.name}`)) {
+          await deleteModelAssetSource(current.id, existing.id, revision);
+          stored = null;
+          return;
+        }
+        committed = true;
+        setAssetStatuses((statuses) => ({ ...statuses, [existing.id]: { state: 'loading' } }));
+        setModelImportNotice(null);
+        addLog(`Relinked ${existing.name} · revision ${revision}`, 'success');
+        showToast(`${existing.name} restored in every scene instance`);
+        return;
+      }
+
+      const assetId = createNodeId('model-asset');
+      const asset: ModelAssetRecord = {
+        id: assetId,
+        kind: 'model',
+        name: modelDisplayName(source.fileName),
+        sourceFilename: source.fileName,
+        mimeType: source.mimeType,
+        byteLength: source.byteLength,
+        revision: 1,
+        importedAt: new Date().toISOString(),
+        diagnostics,
+      };
+      await putModelAssetSource(current.id, asset.id, asset.revision, source);
+      stored = { projectId: current.id, assetId: asset.id, revision: asset.revision };
+      const selected = getNode(projectRef.current, selectedId);
+      const parentId = selected?.kind === 'group' ? selected.id : 'scene-root';
+      const result = addModelAsset(projectRef.current, asset, parentId);
+      if (!commitProject(result.project, `Import ${asset.name}`)) {
+        await deleteModelAssetSource(current.id, asset.id, asset.revision);
+        stored = null;
+        return;
+      }
+      committed = true;
+      setSelectedId(result.nodeId);
+      setAssetStatuses((statuses) => ({ ...statuses, [asset.id]: { state: 'loading' } }));
+      setModelImportNotice(null);
+      setAddMenuOpen(false);
+      markQuickStart('added');
+      addLog(`Imported ${source.fileName} · ${diagnostics.meshes} meshes · ${formatTriangles(diagnostics.triangles)} triangles`, 'success');
+      showToast(`${asset.name} added · ${diagnostics.meshes} mesh${diagnostics.meshes === 1 ? '' : 'es'}`);
+    } catch (error) {
+      if (stored && !committed) {
+        void deleteModelAssetSource(stored.projectId, stored.assetId, stored.revision).catch(() => undefined);
+      }
+      const message = error instanceof Error ? error.message : 'This model could not be imported.';
+      setModelImportNotice({ state: 'error', message });
+      addLog(`Model import failed · ${message}`, 'warning');
+      showToast('This model could not be imported');
+    }
+  }, [addLog, commitProject, markQuickStart, selectedId, showToast]);
+
   const handleImport = useCallback(async (file: File | undefined) => {
     if (!file || modeRef.current !== 'edit') return;
     try {
       const value: unknown = JSON.parse(await file.text());
-      const result = loadProjectDocument(value);
+      const portable = readPortableProjectBundle(value);
+      const result = loadProjectDocument(portable?.project ?? value);
       if (!result.ok) throw new Error(result.errors[0] ?? 'Unsupported project schema');
+      if (portable) {
+        for (const entry of portable.sources) {
+          const asset = result.project.assets.find((candidate) => candidate.id === entry.assetId);
+          if (!asset || asset.revision !== entry.revision) {
+            throw new Error(`Project package source ${entry.assetId} does not match its asset metadata.`);
+          }
+        }
+        for (const entry of portable.sources) {
+          await putModelAssetSource(result.project.id, entry.assetId, entry.revision, entry.source);
+        }
+      }
       if (!commitProject(result.project, `Import ${file.name}`)) return;
       setSelectedId(result.project.nodes[0]?.id ?? null);
+      setAssetStatuses({});
       addLog(`Imported ${file.name}`, 'success');
-      showToast(result.warnings.length ? `Project imported · ${result.warnings[0]}` : 'Project imported successfully');
+      const packagedModels = portable?.sources.length ?? 0;
+      showToast(result.warnings.length
+        ? `Project imported · ${result.warnings[0]}`
+        : packagedModels
+          ? `Project imported with ${packagedModels} model file${packagedModels === 1 ? '' : 's'}`
+          : 'Project imported successfully');
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown import error';
       addLog(`Import failed · ${message}`, 'warning');
@@ -479,6 +782,7 @@ export default function App() {
     const next = createStarterProject();
     if (!commitProject(next, 'Create new starter project')) return;
     setSelectedId('player-core');
+    setAssetStatuses({});
     showToast('New starter project created');
   }, [commitProject, showToast]);
 
@@ -530,17 +834,24 @@ export default function App() {
           setUndoStack((entries) => [...entries, { document: before, label: 'Transform object' }].slice(-MAX_HISTORY));
           setRedoStack([]);
           dragStartRef.current = null;
+          const revision = bumpProjectRevision();
           addLog('Transform object');
+          publishAssistantEvent({ type: 'project.changed', revision, label: 'Transform object', actor: 'human' });
+          if (getNode(projectRef.current, id)?.kind === 'model') markQuickStart('styled');
         }
       },
       onStats: setStats,
+      resolveAssetSource: getModelAssetSource,
+      onAssetState: (_nodeId, assetId, state, message) => {
+        setAssetStatuses((statuses) => ({ ...statuses, [assetId]: { state, message } }));
+      },
     });
     engineRef.current = engine;
     return () => {
       engine.dispose();
       engineRef.current = null;
     };
-  }, [addLog]);
+  }, [addLog, bumpProjectRevision, markQuickStart, publishAssistantEvent]);
 
   useEffect(() => engineRef.current?.setDocument(project), [project]);
   useEffect(() => engineRef.current?.setSelected(selectedId), [selectedId]);
@@ -580,6 +891,7 @@ export default function App() {
         if (modeRef.current !== 'edit') stopPlay();
         return;
       }
+      if (isTyping) return;
       if (command && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setCommandPaletteOpen(true);
@@ -631,7 +943,7 @@ export default function App() {
         if (event.key === '3') setBottomOpen((open) => !open);
         return;
       }
-      if (isTyping || command || editingDisabled) return;
+      if (command || editingDisabled) return;
       if (event.key === 'q' || event.key === 'Q') setTool('select');
       if (event.key === 'w' || event.key === 'W') setTool('translate');
       if (event.key === 'e' || event.key === 'E') setTool('rotate');
@@ -643,6 +955,18 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [buildWebGame, commandPaletteOpen, deleteSelected, duplicateSelected, editingDisabled, redo, resetStarter, saveProject, startPlay, stopPlay, undo]);
 
+  const openAssistantPanel = useCallback(() => {
+    setAssistantOpen(true);
+    setInspectorOpen(false);
+    setToast(null);
+    if (window.innerWidth <= 960) {
+      setHierarchyOpen(false);
+      setBottomOpen(false);
+    }
+  }, []);
+
+  const closeAssistantPanel = useCallback(() => setAssistantOpen(false), []);
+
   const commands = useMemo<CommandAction[]>(() => [
     { id: 'save', label: 'Save project', group: 'Project', shortcut: '⌘S', icon: <Save size={15} />, run: () => saveProject() },
     { id: 'export', label: 'Export editable project', group: 'Project', icon: <FileJson size={15} />, run: exportProject },
@@ -653,10 +977,12 @@ export default function App() {
     { id: 'box', label: 'Create Box', group: 'Create', icon: <Box size={15} />, disabled: editingDisabled, run: () => createPrimitive('box') },
     { id: 'sphere', label: 'Create Sphere', group: 'Create', icon: <Circle size={15} />, disabled: editingDisabled, run: () => createPrimitive('sphere') },
     { id: 'group', label: 'Create Empty Group', group: 'Create', icon: <Layers3 size={15} />, disabled: editingDisabled, run: createEmptyGroup },
+    { id: 'import-model', label: 'Import 3D model', group: 'Create', icon: <Upload size={15} />, disabled: editingDisabled, run: () => openModelPicker() },
     { id: 'hierarchy', label: 'Toggle Hierarchy panel', group: 'Window', icon: <PanelLeftOpen size={15} />, run: () => setHierarchyOpen((open) => !open) },
     { id: 'inspector', label: 'Toggle Inspector panel', group: 'Window', icon: <PanelRightOpen size={15} />, run: () => setInspectorOpen((open) => !open) },
     { id: 'project-panel', label: 'Toggle Project panel', group: 'Window', icon: <PanelBottomOpen size={15} />, run: () => setBottomOpen((open) => !open) },
-  ], [buildWebGame, createEmptyGroup, createPrimitive, editingDisabled, enterPreview, exportProject, mode, saveProject, startPlay, stopPlay]);
+    { id: 'assistant', label: 'Open Studio Assistant', group: 'Window', icon: <Sparkles size={15} />, run: openAssistantPanel },
+  ], [buildWebGame, createEmptyGroup, createPrimitive, editingDisabled, enterPreview, exportProject, mode, openAssistantPanel, openModelPicker, saveProject, startPlay, stopPlay]);
 
   const filteredCommands = commands.filter((action) => action.label.toLowerCase().includes(commandQuery.toLowerCase()));
   const runCommand = (action: CommandAction) => {
@@ -695,21 +1021,489 @@ export default function App() {
     if (panel === 'hierarchy') {
       const next = !hierarchyOpen;
       setHierarchyOpen(next);
-      if (next) { setInspectorOpen(false); setBottomOpen(false); }
+      if (next) { setInspectorOpen(false); setAssistantOpen(false); setBottomOpen(false); }
     } else if (panel === 'inspector') {
       const next = !inspectorOpen;
       setInspectorOpen(next);
-      if (next) { setHierarchyOpen(false); setBottomOpen(false); }
+      if (next) { setHierarchyOpen(false); setAssistantOpen(false); setBottomOpen(false); }
     } else {
       const next = !bottomOpen;
       setBottomOpen(next);
-      if (next) { setHierarchyOpen(false); setInspectorOpen(false); }
+      if (next) { setHierarchyOpen(false); setInspectorOpen(false); setAssistantOpen(false); }
     }
   };
 
+  const executeEditorHostTool = useCallback(async (
+    toolName: AgentToolName,
+    rawArguments: Record<string, unknown>,
+    actor: EditorActor = 'assistant',
+  ): Promise<EditorToolExecutionResult> => {
+    const definition = getAgentToolDefinition(toolName);
+    if (!definition || definition.host !== 'editor') {
+      return { ok: false, changed: false, message: 'This tool is not handled by the live editor.', errors: [`${toolName} is not an editor-host tool.`] };
+    }
+    const errors = validateAgentToolArguments(toolName, rawArguments);
+    if (errors.length) return { ok: false, changed: false, message: 'The tool arguments are invalid.', errors };
+    const args = rawArguments;
+
+    if (toolName === 'studio_get_editor_context') {
+      return {
+        ok: true,
+        changed: false,
+        message: `Editor is in ${modeRef.current} mode at revision ${projectRevisionRef.current}.`,
+        errors: [],
+        data: {
+          project: { id: projectRef.current.id, name: projectRef.current.name, schemaVersion: projectRef.current.schemaVersion, revision: projectRevisionRef.current },
+          selection: { selectedId, node: selectedId ? structuredClone(getNode(projectRef.current, selectedId) ?? null) : null },
+          mode: modeRef.current,
+          viewport: { viewMode, tool, space, snap, gridVisible },
+          layout: { experience, hierarchyOpen, inspectorOpen, assistantOpen, bottomOpen, bottomTab, previewMode },
+          history: { canUndo: undoStack.length > 0, canRedo: redoStack.length > 0, undoDepth: undoStack.length, redoDepth: redoStack.length },
+          dirty,
+          lastSaved,
+        },
+      };
+    }
+
+    if (toolName === 'studio_get_diagnostics') {
+      const available = {
+        editor: window.__THREE_GAME_DIAGNOSTICS__?.editor ?? { mode: modeRef.current, viewMode, selectedId, objectCount: projectRef.current.nodes.length, schemaVersion: projectRef.current.schemaVersion, assetCount: projectRef.current.assets.length },
+        renderer: window.__THREE_GAME_DIAGNOSTICS__?.renderer ?? structuredClone(stats),
+        assets: window.__THREE_GAME_DIAGNOSTICS__?.assets ?? { statuses: structuredClone(assetStatuses) },
+        history: { revision: projectRevisionRef.current, undoDepth: undoStack.length, redoDepth: redoStack.length, dirty },
+      };
+      const sections = args.sections as Array<keyof typeof available> | undefined;
+      const data = sections?.length
+        ? Object.fromEntries(sections.map((section) => [section, available[section]]))
+        : available;
+      return { ok: true, changed: false, message: 'Read live editor diagnostics.', errors: [], data: structuredClone(data) };
+    }
+
+    if (toolName === 'studio_select_node') {
+      const nodeId = args.nodeId as string | null;
+      if (nodeId && !getNode(projectRef.current, nodeId)) {
+        return { ok: false, changed: false, message: 'The requested node does not exist.', errors: [`Node "${nodeId}" does not exist.`] };
+      }
+      setSelectedId(nodeId);
+      if (args.reveal === true) {
+        setHierarchyOpen(true);
+        setInspectorOpen(true);
+        setAssistantOpen(false);
+      }
+      if (args.frame === true && nodeId) window.requestAnimationFrame(() => engineRef.current?.frameSelection());
+      return { ok: true, changed: true, message: nodeId ? `Selected ${getNode(projectRef.current, nodeId)?.name ?? nodeId}.` : 'Cleared the editor selection.', errors: [], data: { selectedId: nodeId } };
+    }
+
+    if (toolName === 'studio_set_viewport') {
+      if (args.viewMode) setViewMode(args.viewMode as ViewMode);
+      if (args.tool) setTool(args.tool as EditorTool);
+      if (args.space) setSpace(args.space as 'local' | 'world');
+      if (typeof args.snap === 'boolean') setSnap(args.snap);
+      if (typeof args.gridVisible === 'boolean') setGridVisible(args.gridVisible);
+      if (args.cameraView) engineRef.current?.setCameraView(args.cameraView as 'perspective' | 'top' | 'right' | 'front');
+      if (args.frameSelection === true) engineRef.current?.frameSelection();
+      if (typeof args.fullscreen === 'boolean') {
+        try {
+          if (args.fullscreen && !document.fullscreenElement) await viewportRef.current?.requestFullscreen();
+          if (!args.fullscreen && document.fullscreenElement) await document.exitFullscreen();
+        } catch {
+          return { ok: false, changed: false, message: 'Fullscreen is unavailable in this browser.', errors: ['The browser rejected the fullscreen request.'] };
+        }
+      }
+      return { ok: true, changed: true, message: 'Updated the live viewport configuration.', errors: [], data: { ...args } };
+    }
+
+    if (toolName === 'studio_control_runtime') {
+      const action = args.action as 'play' | 'pause' | 'resume' | 'step' | 'stop' | 'preview' | 'exit-preview';
+      if (action === 'play') {
+        if (modeRef.current !== 'edit') return { ok: false, changed: false, message: 'Runtime is already active.', errors: ['Play requires Edit mode.'] };
+        startPlay();
+      } else if (action === 'pause') {
+        if (modeRef.current !== 'play') return { ok: false, changed: false, message: 'Runtime is not playing.', errors: ['Pause requires Play mode.'] };
+        togglePause();
+      } else if (action === 'resume') {
+        if (modeRef.current !== 'paused') return { ok: false, changed: false, message: 'Runtime is not paused.', errors: ['Resume requires Paused mode.'] };
+        togglePause();
+      } else if (action === 'step') {
+        if (modeRef.current !== 'paused') return { ok: false, changed: false, message: 'Runtime is not paused.', errors: ['Step requires Paused mode.'] };
+        engineRef.current?.step();
+      } else if (action === 'preview') {
+        if (modeRef.current !== 'edit') return { ok: false, changed: false, message: 'Runtime is already active.', errors: ['Preview requires Edit mode.'] };
+        enterPreview();
+      } else if (action === 'exit-preview') {
+        if (!previewMode) return { ok: false, changed: false, message: 'Clean Preview is not active.', errors: ['Exit Preview requires an active clean preview.'] };
+        stopPlay();
+      } else {
+        if (modeRef.current === 'edit') return { ok: false, changed: false, message: 'Runtime is already stopped.', errors: ['Stop requires an active runtime.'] };
+        stopPlay();
+      }
+      return { ok: true, changed: true, message: `Runtime action completed: ${action}.`, errors: [], data: { action } };
+    }
+
+    if (toolName === 'studio_control_history') {
+      const action = args.action as 'undo' | 'redo';
+      if (modeRef.current !== 'edit') {
+        return { ok: false, changed: false, message: 'History is locked while the runtime is active.', errors: ['Undo and redo require Edit mode.'] };
+      }
+      if (action === 'undo') {
+        if (!undoStack.length) return { ok: false, changed: false, message: 'There is nothing to undo.', errors: ['Undo history is empty.'] };
+        undo(actor);
+      } else {
+        if (!redoStack.length) return { ok: false, changed: false, message: 'There is nothing to redo.', errors: ['Redo history is empty.'] };
+        redo(actor);
+      }
+      return { ok: true, changed: true, message: `${action === 'undo' ? 'Undid' : 'Redid'} one editor transaction.`, errors: [], data: { action } };
+    }
+
+    if (toolName === 'studio_get_console') {
+      const level = args.level as ConsoleEntry['level'] | undefined;
+      const query = typeof args.query === 'string' ? args.query.toLowerCase() : '';
+      const limit = (args.limit as number | undefined) ?? 50;
+      const entries = consoleEntries.filter((entry) => (!level || entry.level === level) && (!query || entry.message.toLowerCase().includes(query))).slice(-limit);
+      return { ok: true, changed: false, message: `Read ${entries.length} console entr${entries.length === 1 ? 'y' : 'ies'}.`, errors: [], data: { entries: structuredClone(entries), total: entries.length } };
+    }
+
+    if (toolName === 'studio_clear_console') {
+      setConsoleEntries([]);
+      return { ok: true, changed: true, message: 'Cleared the editor console.', errors: [] };
+    }
+
+    if (toolName === 'studio_set_editor_layout') {
+      if (args.experience) changeExperience(args.experience as ExperienceLevel);
+      if (typeof args.hierarchyOpen === 'boolean') setHierarchyOpen(args.hierarchyOpen);
+      if (typeof args.inspectorOpen === 'boolean') {
+        setInspectorOpen(args.inspectorOpen);
+        if (args.inspectorOpen) setAssistantOpen(false);
+      }
+      if (typeof args.bottomOpen === 'boolean') setBottomOpen(args.bottomOpen);
+      if (args.bottomTab) setBottomTab(args.bottomTab as 'assets' | 'console');
+      if (typeof args.quickStartOpen === 'boolean') setQuickStart((current) => ({ ...current, dismissed: !args.quickStartOpen }));
+      if (typeof args.commandPaletteOpen === 'boolean') setCommandPaletteOpen(args.commandPaletteOpen);
+      return { ok: true, changed: true, message: 'Updated the editor layout.', errors: [], data: { ...args } };
+    }
+
+    if (toolName === 'studio_save_project') {
+      const saved = saveProject();
+      return saved
+        ? { ok: true, changed: true, message: 'Saved the project to browser storage.', errors: [] }
+        : { ok: false, changed: false, message: 'Browser storage is unavailable.', errors: ['The project could not be saved to browser storage.'] };
+    }
+    if (toolName === 'studio_export_project') {
+      const result = await exportProject(args.filename as string | undefined);
+      return result.ok
+        ? { ok: true, changed: true, message: result.message, errors: [] }
+        : { ok: false, changed: false, message: 'The editable project could not be exported.', errors: [result.message] };
+    }
+    if (toolName === 'studio_build_project') {
+      const result = await buildWebGame(args.filename as string | undefined);
+      return result.ok
+        ? { ok: true, changed: true, message: result.message, errors: [] }
+        : { ok: false, changed: false, message: 'The standalone web build failed.', errors: [result.message] };
+    }
+    if (toolName === 'studio_request_project_import') {
+      importInputRef.current?.click();
+      return { ok: true, changed: true, message: 'Opened the project file picker for the user.', errors: [] };
+    }
+    if (toolName === 'studio_request_model_import') {
+      const assetId = args.assetId as string | undefined;
+      if (assetId && !projectRef.current.assets.some((asset) => asset.id === assetId)) {
+        return { ok: false, changed: false, message: 'The requested model asset does not exist.', errors: [`Model asset "${assetId}" does not exist.`] };
+      }
+      openModelPicker(assetId);
+      return { ok: true, changed: true, message: assetId ? 'Opened the model picker to relink the asset.' : 'Opened the model picker for the user.', errors: [] };
+    }
+
+    return { ok: false, changed: false, message: 'The editor tool is not implemented.', errors: [`${toolName} has no live editor handler.`] };
+  }, [
+    assetStatuses,
+    assistantOpen,
+    bottomOpen,
+    bottomTab,
+    buildWebGame,
+    changeExperience,
+    consoleEntries,
+    dirty,
+    enterPreview,
+    experience,
+    exportProject,
+    gridVisible,
+    hierarchyOpen,
+    inspectorOpen,
+    lastSaved,
+    openModelPicker,
+    previewMode,
+    redo,
+    redoStack,
+    saveProject,
+    selectedId,
+    snap,
+    space,
+    startPlay,
+    stats,
+    stopPlay,
+    togglePause,
+    tool,
+    undo,
+    undoStack,
+    viewMode,
+  ]);
+
+  const appendAssistantMessage = useCallback((message: Omit<AssistantMessage, 'id'>) => {
+    setAssistantMessages((current) => [...current, { ...message, id: assistantId('message') }].slice(-80));
+  }, []);
+
+  const prepareAssistantCalls = useCallback(async ({
+    title,
+    description,
+    toolCalls,
+    source,
+    proposalId,
+  }: {
+    title: string;
+    description: string;
+    toolCalls: StudioAgentToolCall[];
+    source: PendingAssistantPlan['source'];
+    proposalId?: string;
+  }) => {
+    if (!toolCalls.length) return { status: 'rejected' as const, errors: ['A tool plan must contain at least one call.'] };
+    const definitions = toolCalls.map((call) => getAgentToolDefinition(call.name));
+    if (definitions.some((definition) => !definition)) {
+      return { status: 'rejected' as const, errors: ['The plan contains a tool outside the advertised capability manifest.'] };
+    }
+    const argumentErrors = toolCalls.flatMap((call) => validateAgentToolArguments(call.name, call.arguments));
+    if (argumentErrors.length) return { status: 'rejected' as const, errors: argumentErrors };
+
+    const editorCalls = toolCalls.filter((call) => getAgentToolDefinition(call.name)?.host === 'editor');
+    const projectCalls = toolCalls.filter((call) => getAgentToolDefinition(call.name)?.host === 'project');
+    if (editorCalls.length && projectCalls.length) {
+      return { status: 'rejected' as const, errors: ['Project edits and live-editor actions must be reviewed as separate transactions.'] };
+    }
+
+    if (definitions.every((definition) => definition?.readOnly)) {
+      if (projectCalls.length) {
+        const batch = executeAgentToolBatch(projectRef.current, projectCalls);
+        if (!batch.ok) return { status: 'rejected' as const, errors: batch.errors };
+        const message = summarizeAgentBatch(batch);
+        if (source === 'guided') appendAssistantMessage({ role: 'assistant', text: message });
+        return { status: 'completed' as const, message, data: batch.results.map((result) => result.data) };
+      }
+      const results: EditorToolExecutionResult[] = [];
+      try {
+        const actor: EditorActor = source === 'bridge' ? 'integration' : 'assistant';
+        for (const call of editorCalls) results.push(await executeEditorHostTool(call.name, call.arguments, actor));
+      } catch (error) {
+        return { status: 'rejected' as const, errors: [error instanceof Error ? error.message : 'The live editor read failed.'] };
+      }
+      const failed = results.find((result) => !result.ok);
+      if (failed) return { status: 'rejected' as const, errors: failed.errors };
+      const message = results.map((result) => result.message).join('\n');
+      if (source === 'guided') appendAssistantMessage({ role: 'assistant', text: message });
+      return { status: 'completed' as const, message, data: results.map((result) => result.data) };
+    }
+
+    if (pendingAssistantPlanRef.current) {
+      return { status: 'rejected' as const, errors: ['Review or discard the current proposal before creating another one.'] };
+    }
+
+    if (editorCalls.length > 1) {
+      return { status: 'rejected' as const, errors: ['Live-editor actions are proposed one at a time because session state cannot yet be rolled back atomically.'] };
+    }
+
+    const batch = projectCalls.length ? executeAgentToolBatch(projectRef.current, projectCalls) : undefined;
+    if (batch && !batch.ok) return { status: 'rejected' as const, errors: batch.errors };
+    if (batch && !batch.changed) {
+      const message = summarizeAgentBatch(batch);
+      if (source === 'guided') appendAssistantMessage({ role: 'assistant', text: message });
+      return { status: 'completed' as const, message, data: batch.results.map((result) => result.data) };
+    }
+
+    const id = proposalId ?? assistantId('proposal');
+    const plan: PendingAssistantPlan = {
+      id,
+      title,
+      description,
+      baseRevision: projectRevisionRef.current,
+      source,
+      toolCalls,
+      ...(batch ? { batch } : {}),
+      calls: toolCalls.map((call, index) => {
+        const definition = definitions[index]!;
+        const assessment = assessAgentToolCall(projectRef.current, call.name, call.arguments);
+        const fileSideEffect = definition.scopes.some((scope) => scope.includes('local-files') || scope.includes('downloads'));
+        const effect = definition.readOnly
+          ? 'read'
+          : fileSideEffect
+            ? 'file'
+            : assessment.level === 'destructive'
+              ? 'destructive'
+              : assessment.requiresApproval && assessment.level === 'moderate'
+                ? 'sensitive'
+                : 'write';
+        return {
+          name: call.name,
+          title: definition.title,
+          effect,
+          summary: batch?.results[index]?.message ?? definition.description,
+          arguments: structuredClone(call.arguments),
+          ...(effect === 'sensitive' ? { reviewNote: assessment.reasons.join(' ') } : {}),
+        };
+      }),
+    };
+    pendingAssistantPlanRef.current = plan;
+    setPendingAssistantPlan(plan);
+    openAssistantPanel();
+    publishAssistantEvent({ type: 'proposal.created', revision: plan.baseRevision, proposalId: id, label: title, actor: source === 'bridge' ? 'integration' : 'assistant' });
+    return { status: 'approval_required' as const, proposalId: id, baseRevision: plan.baseRevision };
+  }, [appendAssistantMessage, executeEditorHostTool, openAssistantPanel, publishAssistantEvent]);
+
+  const submitAssistantPrompt = useCallback(async (prompt: string) => {
+    appendAssistantMessage({ role: 'user', text: prompt });
+    setAssistantBusy(true);
+    try {
+      const plan = await guidedStudioAgentProvider.plan({ project: projectRef.current, selectedId, prompt });
+      if (!plan.ok || plan.kind === 'unsupported') {
+        appendAssistantMessage({ role: 'assistant', status: 'warning', text: plan.description });
+        return;
+      }
+      const result = await prepareAssistantCalls({ title: plan.title, description: plan.description, toolCalls: plan.calls, source: 'guided' });
+      if (result.status === 'rejected') appendAssistantMessage({ role: 'assistant', status: 'warning', text: result.errors.join('\n') });
+    } catch (error) {
+      appendAssistantMessage({ role: 'assistant', status: 'warning', text: error instanceof Error ? error.message : 'The Guided Assistant could not prepare that request.' });
+    } finally {
+      setAssistantBusy(false);
+    }
+  }, [appendAssistantMessage, prepareAssistantCalls, selectedId]);
+
+  const applyPendingAssistantPlan = useCallback(async () => {
+    const plan = pendingAssistantPlan;
+    if (!plan || assistantApplyInFlightRef.current) return;
+    if (plan.baseRevision !== projectRevisionRef.current) {
+      appendAssistantMessage({ role: 'assistant', status: 'warning', text: `This proposal was prepared for revision ${plan.baseRevision}, but the project is now at revision ${projectRevisionRef.current}. Discard it and ask me to review the current scene.` });
+      return;
+    }
+    if (plan.batch && modeRef.current !== 'edit') {
+      appendAssistantMessage({ role: 'assistant', status: 'warning', text: 'Stop Play mode before applying authored scene changes.' });
+      return;
+    }
+    assistantApplyInFlightRef.current = plan.id;
+    setAssistantBusy(true);
+    try {
+      if (plan.batch) {
+        const actor: EditorActor = plan.source === 'bridge' ? 'integration' : 'assistant';
+        const label = `${plan.source === 'bridge' ? 'Integration' : 'Studio Assistant'} · ${plan.title}`;
+        if (!commitProject(plan.batch.nextProject, label, actor)) return;
+        setLastAssistantCommit({ revision: projectRevisionRef.current, label, actor });
+        if (plan.batch.selectedId) setSelectedId(plan.batch.selectedId);
+        if (plan.toolCalls.some((call) => call.name === 'studio_create_primitive' || call.name === 'studio_add_model_instance')) markQuickStart('added');
+        if (plan.toolCalls.some((call) => call.name === 'studio_update_node' || call.name === 'studio_update_world_settings')) markQuickStart('styled');
+        appendAssistantMessage({ role: 'tool', label: plan.source === 'bridge' ? 'Integration tool result' : 'Tool result', status: 'success', text: `${plan.batch.messages.join(' ')} The complete plan is one Undo step.` });
+      } else {
+        const call = plan.toolCalls[0];
+        const actor: EditorActor = plan.source === 'bridge' ? 'integration' : 'assistant';
+        const result = call ? await executeEditorHostTool(call.name, call.arguments, actor) : null;
+        if (!result?.ok) {
+          appendAssistantMessage({ role: 'tool', status: 'warning', text: result?.errors.join('\n') || 'The live editor action could not be applied.' });
+          return;
+        }
+        appendAssistantMessage({ role: 'tool', status: 'success', text: result.message });
+      }
+      if (pendingAssistantPlanRef.current?.id === plan.id) {
+        pendingAssistantPlanRef.current = null;
+        setPendingAssistantPlan((current) => current?.id === plan.id ? null : current);
+      }
+      publishAssistantEvent({ type: 'proposal.applied', revision: projectRevisionRef.current, proposalId: plan.id, label: plan.title, actor: plan.source === 'bridge' ? 'integration' : 'assistant' });
+    } catch (error) {
+      appendAssistantMessage({ role: 'tool', status: 'warning', text: error instanceof Error ? error.message : 'The live editor action failed without changing the project.' });
+    } finally {
+      if (assistantApplyInFlightRef.current === plan.id) assistantApplyInFlightRef.current = null;
+      setAssistantBusy(false);
+    }
+  }, [appendAssistantMessage, commitProject, executeEditorHostTool, markQuickStart, pendingAssistantPlan, publishAssistantEvent]);
+
+  const discardPendingAssistantPlan = useCallback(() => {
+    if (!pendingAssistantPlan) return;
+    if (assistantApplyInFlightRef.current === pendingAssistantPlan.id) return;
+    appendAssistantMessage({ role: 'assistant', text: `Discarded “${pendingAssistantPlan.title}”. No changes were applied.` });
+    publishAssistantEvent({ type: 'proposal.dismissed', revision: projectRevisionRef.current, proposalId: pendingAssistantPlan.id, label: pendingAssistantPlan.title, actor: pendingAssistantPlan.source === 'bridge' ? 'integration' : 'assistant' });
+    pendingAssistantPlanRef.current = null;
+    setPendingAssistantPlan(null);
+  }, [appendAssistantMessage, pendingAssistantPlan, publishAssistantEvent]);
+
+  const undoLastAssistantPlan = useCallback(() => {
+    const marker = lastAssistantCommit;
+    if (!marker || modeRef.current !== 'edit') return;
+    if (marker.revision !== projectRevisionRef.current || undoStack.at(-1)?.label !== marker.label) return;
+    undo(marker.actor);
+    setLastAssistantCommit(null);
+    appendAssistantMessage({ role: 'tool', status: 'success', text: 'Undid the complete Assistant plan in one history step.' });
+  }, [appendAssistantMessage, lastAssistantCommit, undo, undoStack]);
+
+  useEffect(() => {
+    assistantSnapshotRef.current = () => ({
+      revision: projectRevisionRef.current,
+      project: cloneProject(projectRef.current),
+      selectedId,
+      mode: modeRef.current,
+      viewport: { viewMode, tool, space, snap, gridVisible },
+      layout: { experience, hierarchyOpen, inspectorOpen, assistantOpen, bottomOpen, bottomTab, previewMode },
+      history: { canUndo: undoStack.length > 0, canRedo: redoStack.length > 0 },
+      renderer: structuredClone(stats),
+    });
+    assistantRequestRef.current = async (request) => {
+      const requestId = request.requestId ?? assistantId('request');
+      const definition = getAgentToolDefinition(request.tool);
+      if (!definition) return { status: 'rejected', requestId, errors: [`Unknown agent tool "${request.tool}".`] };
+      const args = request.arguments ?? {};
+      const errors = validateAgentToolArguments(request.tool, args);
+      if (errors.length) return { status: 'rejected', requestId, errors };
+      if (!definition.readOnly && request.baseRevision === undefined) {
+        return { status: 'rejected', requestId, errors: ['Mutating requests require baseRevision.'], currentRevision: projectRevisionRef.current };
+      }
+      if (request.baseRevision !== undefined && request.baseRevision !== projectRevisionRef.current) {
+        return { status: 'revision_conflict', requestId, baseRevision: request.baseRevision, currentRevision: projectRevisionRef.current, retryable: true };
+      }
+      const result = await prepareAssistantCalls({
+        title: definition.title,
+        description: definition.description,
+        toolCalls: [{ name: definition.name, arguments: args }],
+        source: 'bridge',
+        proposalId: `proposal-${requestId}`,
+      });
+      return { ...result, requestId };
+    };
+  }, [assistantOpen, bottomOpen, bottomTab, experience, gridVisible, hierarchyOpen, inspectorOpen, prepareAssistantCalls, previewMode, redoStack.length, selectedId, snap, space, stats, tool, undoStack.length, viewMode]);
+
+  useEffect(() => {
+    const bridge: ThreeGameStudioAgentBridge = {
+      apiVersion: 1,
+      manifest: () => structuredClone(AGENT_CAPABILITY_MANIFEST),
+      snapshot: () => assistantSnapshotRef.current(),
+      request: (request) => assistantRequestRef.current(request),
+      subscribe: (listener) => {
+        if (typeof listener !== 'function') return () => undefined;
+        assistantSubscribersRef.current.add(listener);
+        return () => assistantSubscribersRef.current.delete(listener);
+      },
+    };
+    window.__THREE_GAME_STUDIO_AGENT__ = bridge;
+    return () => {
+      if (window.__THREE_GAME_STUDIO_AGENT__ === bridge) delete window.__THREE_GAME_STUDIO_AGENT__;
+      assistantSubscribersRef.current.clear();
+      pendingAssistantPlanRef.current = null;
+      assistantApplyInFlightRef.current = null;
+    };
+  }, []);
+
+  const canUndoLastAssistantPlan = Boolean(
+    lastAssistantCommit &&
+    mode === 'edit' &&
+    lastAssistantCommit.revision === projectRevision &&
+    undoStack.at(-1)?.label === lastAssistantCommit.label
+  );
+
   return (
     <div
-      className={`studio-app experience-${experience} mode-${mode} ${previewMode ? 'preview-mode' : ''}`}
+      className={`studio-app experience-${experience} mode-${mode} ${previewMode ? 'preview-mode' : ''} ${bottomOpen ? 'panel-bottom-open' : ''} ${hierarchyOpen ? 'panel-hierarchy-open' : ''} ${inspectorOpen ? 'panel-inspector-open' : ''} ${assistantOpen ? 'panel-agent-open' : ''}`}
       data-testid="studio-app"
       data-experience={experience}
       data-step={quickStartStep}
@@ -733,8 +1527,8 @@ export default function App() {
           {experience === 'advanced' ? <ChevronDown size={12} /> : null}
         </div>
         <div className="history-actions">
-          <IconButton label={undoStack.length ? `Undo ${undoStack.at(-1)?.label}` : 'Nothing to undo'} compact disabled={!undoStack.length || editingDisabled} onClick={undo}><Undo2 size={14} /></IconButton>
-          <IconButton label={redoStack.length ? `Redo ${redoStack.at(-1)?.label}` : 'Nothing to redo'} compact disabled={!redoStack.length || editingDisabled} onClick={redo}><Redo2 size={14} /></IconButton>
+          <IconButton label={undoStack.length ? `Undo ${undoStack.at(-1)?.label}` : 'Nothing to undo'} compact disabled={!undoStack.length || editingDisabled} onClick={() => undo()}><Undo2 size={14} /></IconButton>
+          <IconButton label={redoStack.length ? `Redo ${redoStack.at(-1)?.label}` : 'Nothing to redo'} compact disabled={!redoStack.length || editingDisabled} onClick={() => redo()}><Redo2 size={14} /></IconButton>
           <IconButton label="Save project" compact onClick={() => saveProject()} testId="save-project"><Save size={14} /></IconButton>
         </div>
         <div className="play-controls" aria-label="Play controls">
@@ -758,7 +1552,7 @@ export default function App() {
         <div className="topbar-actions">
           <span className="autosave-state"><Check size={12} />{dirty ? 'Saving…' : lastSaved}</span>
           {experience === 'advanced' ? <button type="button" className="secondary-action" onClick={enterPreview}><Globe2 size={14} /><span>Preview</span></button> : null}
-          <button type="button" className="primary-action" onClick={buildWebGame} data-testid="build-button"><Rocket size={14} /><span>Build</span></button>
+          <button type="button" className="primary-action" onClick={() => buildWebGame()} data-testid="build-button"><Rocket size={14} /><span>Build</span></button>
         </div>
       </header>
 
@@ -812,13 +1606,14 @@ export default function App() {
       <div className="workbench">
         <nav className="activity-rail" aria-label="Editor panels">
           <IconButton label="Main menu" compact className="compact-menu-trigger" onClick={() => setOpenMenu('file')}><Menu size={16} /></IconButton>
-          <IconButton label="Scene hierarchy" active={hierarchyOpen} onClick={() => setHierarchyOpen((open) => !open)}><Layers3 size={16} /></IconButton>
-          {experience === 'advanced' ? <IconButton label="Project assets" active={bottomOpen && bottomTab === 'assets'} onClick={() => { setBottomOpen(true); setBottomTab('assets'); }}><Package size={16} /></IconButton> : null}
-          {experience === 'advanced' ? <IconButton label="Console" active={bottomOpen && bottomTab === 'console'} onClick={() => { setBottomOpen(true); setBottomTab('console'); }}><Terminal size={16} /></IconButton> : null}
-          <IconButton label="Inspector" active={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}><SlidersHorizontal size={16} /></IconButton>
+          <IconButton label="Scene hierarchy" active={hierarchyOpen} onClick={() => setHierarchyOpen((open) => { const next = !open; if (next && window.innerWidth <= 960) setAssistantOpen(false); return next; })}><Layers3 size={16} /></IconButton>
+          {experience === 'advanced' ? <IconButton label="Project assets" active={bottomOpen && bottomTab === 'assets'} onClick={() => { setBottomOpen(true); setBottomTab('assets'); if (window.innerWidth <= 960) setAssistantOpen(false); }}><Package size={16} /></IconButton> : null}
+          {experience === 'advanced' ? <IconButton label="Console" active={bottomOpen && bottomTab === 'console'} onClick={() => { setBottomOpen(true); setBottomTab('console'); if (window.innerWidth <= 960) setAssistantOpen(false); }}><Terminal size={16} /></IconButton> : null}
+          <IconButton label="Inspector" active={inspectorOpen && !assistantOpen} onClick={() => setInspectorOpen((open) => { const next = !open || assistantOpen; if (next) setAssistantOpen(false); return next; })}><SlidersHorizontal size={16} /></IconButton>
+          <IconButton label={pendingAssistantPlan && !assistantOpen ? 'Studio Assistant · proposal awaiting review' : 'Studio Assistant'} active={assistantOpen} onClick={() => assistantOpen ? closeAssistantPanel() : openAssistantPanel()} testId="assistant-toggle"><span className="agent-trigger-icon"><Sparkles size={16} />{pendingAssistantPlan && !assistantOpen ? <i aria-hidden="true" /> : null}</span></IconButton>
           <span className="activity-spacer" />
           {experience === 'advanced' ? <IconButton label="Command palette" onClick={() => setCommandPaletteOpen(true)}><Command size={16} /></IconButton> : null}
-          <IconButton label="World settings" onClick={() => { setSelectedId('scene-root'); setInspectorOpen(true); }}><Settings2 size={16} /></IconButton>
+          <IconButton label="World settings" onClick={() => { setSelectedId('scene-root'); setInspectorOpen(true); setAssistantOpen(false); }}><Settings2 size={16} /></IconButton>
         </nav>
 
         {hierarchyOpen ? (
@@ -851,6 +1646,11 @@ export default function App() {
                 <button type="button" className="toolbar-add" disabled={editingDisabled} onClick={() => setAddMenuOpen((open) => !open)} data-testid="add-object"><Plus size={14} /><span>Create</span><ChevronDown size={11} /></button>
                 {addMenuOpen ? (
                   <div className="viewport-add-menu">
+                    <span>From file</span>
+                    <button type="button" data-testid="import-model" onClick={() => openModelPicker()}><Upload size={15} /><span>Import 3D model…</span></button>
+                    {project.assets.length ? <span>My models</span> : null}
+                    {project.assets.slice(-5).reverse().map((asset) => <button type="button" key={asset.id} data-model-asset-id={asset.id} onClick={() => activateAsset(studioAssets.find((entry) => entry.id === asset.id)!)}><Boxes size={15} /><span>{asset.name}</span></button>)}
+                    <span>Scene</span>
                     <button type="button" onClick={createEmptyGroup}><Layers3 size={15} /><span>Empty Group</span></button>
                     <span>3D Object</span>
                     {primitives.map((primitive) => <button type="button" key={primitive} onClick={() => createPrimitive(primitive)} data-testid={`create-${primitive}`}><PrimitiveIcon primitive={primitive} /><span>{primitiveLabel(primitive)}</span></button>)}
@@ -889,6 +1689,20 @@ export default function App() {
                 <i />
                 <span>{mode === 'edit' ? 'Edit mode' : mode === 'paused' ? 'Paused' : 'Live'}</span>
               </div>
+              {modelImportNotice ? (
+                <section className={`model-import-status is-${modelImportNotice.state}`} data-testid="model-import-status" data-asset-status={modelImportNotice.state}>
+                  <span className="model-status-icon">{modelImportNotice.state === 'loading' ? <span className="model-status-spinner" /> : <Triangle size={14} />}</span>
+                  <span><strong>{modelImportNotice.state === 'loading' ? 'Preparing model' : 'This model could not be imported'}</strong><small>{modelImportNotice.message}</small></span>
+                  {modelImportNotice.state === 'error' ? <button type="button" onClick={() => openModelPicker()}>Choose another file</button> : null}
+                  {modelImportNotice.state === 'error' ? <button type="button" className="model-status-close" aria-label="Dismiss model import error" onClick={() => setModelImportNotice(null)}><X size={13} /></button> : null}
+                </section>
+              ) : modelIssue ? (
+                <section className="model-import-status is-missing" data-testid="model-import-status" data-asset-status={assetStatuses[modelIssue.id]?.state}>
+                  <span className="model-status-icon"><Triangle size={14} /></span>
+                  <span><strong>{modelIssue.name} needs its source file</strong><small>{assetStatuses[modelIssue.id]?.message ?? 'The model is still in your scene, but its local file is missing.'}</small></span>
+                  <button type="button" data-testid="model-relink" onClick={() => openModelPicker(modelIssue.id)}>Relink model</button>
+                </section>
+              ) : null}
               {mode !== 'edit' && experience === 'advanced' ? <div className="playing-badge"><span /><strong>{mode === 'paused' ? 'PAUSED' : 'PLAYING'}</strong></div> : null}
               {mode !== 'edit' && experience === 'essentials' ? <div className="essential-runtime-banner" data-testid="runtime-banner"><span className="preview-live-dot" /><strong>Playing</strong><span>Use WASD or arrow keys · Esc to return</span><button type="button" onClick={stopPlay}>Stop</button></div> : null}
               {viewMode === 'scene' && experience === 'advanced' ? (
@@ -901,7 +1715,7 @@ export default function App() {
               ) : null}
               {experience === 'advanced' ? <div className="viewport-stats"><span>{Math.round(stats.fps)} FPS</span><span>{stats.drawCalls} calls</span><span>{stats.triangles.toLocaleString()} tris</span></div> : null}
               {viewMode === 'game' && mode === 'edit' && experience === 'advanced' ? <div className="game-view-hint"><Camera size={13} /> Main Camera preview</div> : null}
-              {experience === 'essentials' && mode === 'edit' && !quickStart.dismissed ? (
+              {experience === 'essentials' && mode === 'edit' && !quickStart.dismissed && !assistantOpen ? (
                 <section className="quick-start-card" data-testid="quick-start" data-step={quickStartStep} aria-label="Quick Start">
                   <header>
                     <span className="quick-start-icon"><Sparkles size={15} /></span>
@@ -909,10 +1723,10 @@ export default function App() {
                     <button type="button" aria-label="Dismiss Quick Start" data-testid="quick-start-dismiss" onClick={() => setQuickStart((current) => ({ ...current, dismissed: true }))}><X size={13} /></button>
                   </header>
                   <div className="quick-start-progress" aria-hidden="true"><i className={quickStart.added ? 'is-done' : 'is-current'} /><i className={quickStart.styled ? 'is-done' : quickStart.added ? 'is-current' : ''} /><i className={quickStart.played ? 'is-done' : quickStart.styled ? 'is-current' : ''} /></div>
-                  {quickStartStep === 'add' ? <><strong>Add your first shape</strong><p>Choose a shape and it will appear in the scene, ready to edit.</p><button type="button" className="quick-start-action" onClick={() => setAddMenuOpen(true)}>Choose a shape</button></> : null}
-                  {quickStartStep === 'style' ? <><strong>Make it yours</strong><p>Use Appearance in Details to change the selected shape’s color.</p><button type="button" className="quick-start-action" onClick={() => setInspectorOpen(true)}>Open color controls</button></> : null}
+                  {quickStartStep === 'add' ? <><strong>Add your first object</strong><p>Start with a shape or bring in a self-contained GLB model.</p><button type="button" className="quick-start-action" onClick={() => setAddMenuOpen(true)}>Choose a shape</button><button type="button" className="quick-start-secondary" onClick={() => openModelPicker()}>Import a 3D model</button></> : null}
+                  {quickStartStep === 'style' ? selectedNode?.kind === 'model' ? <><strong>Place your model</strong><p>Use Transform or Sizing in Details to fit the model into your world.</p><button type="button" className="quick-start-action" onClick={() => setInspectorOpen(true)}>Open model controls</button></> : <><strong>Make it yours</strong><p>Use Appearance in Details to change the selected shape’s color.</p><button type="button" className="quick-start-action" onClick={() => setInspectorOpen(true)}>Open color controls</button></> : null}
                   {quickStartStep === 'play' ? <><strong>Try your game</strong><p>Play runs every Motion component without changing your authored scene.</p><button type="button" className="quick-start-action" onClick={startPlay}><Play size={12} fill="currentColor" /> Play the game</button></> : null}
-                  {quickStartStep === 'complete' ? <><strong>Your first scene works</strong><p>Keep editing, switch to Advanced, or build a standalone web game.</p><button type="button" className="quick-start-action" onClick={buildWebGame}><Rocket size={12} /> Build web game</button><button type="button" className="quick-start-secondary" onClick={() => setQuickStart((current) => ({ ...current, dismissed: true }))}>Continue editing</button></> : null}
+                  {quickStartStep === 'complete' ? <><strong>Your first scene works</strong><p>Keep editing, switch to Advanced, or build a standalone web game.</p><button type="button" className="quick-start-action" onClick={() => buildWebGame()}><Rocket size={12} /> Build web game</button><button type="button" className="quick-start-secondary" onClick={() => setQuickStart((current) => ({ ...current, dismissed: true }))}>Continue editing</button></> : null}
                 </section>
               ) : null}
             </div>
@@ -921,17 +1735,45 @@ export default function App() {
             <BottomDock
               tab={bottomTab}
               onTabChange={setBottomTab}
-              assets={BUILT_IN_ASSETS}
+              assets={studioAssets}
               selectedNode={selectedNode}
+              assetStatuses={assetStatuses}
               entries={consoleEntries}
               onActivateAsset={activateAsset}
+              onImportModel={() => openModelPicker()}
+              onRelinkModel={openModelPicker}
               onClearConsole={() => setConsoleEntries([])}
               onClose={() => setBottomOpen(false)}
             />
           ) : null}
         </main>
 
-        {inspectorOpen ? <InspectorPanel node={selectedNode} project={project} experience={experience} disabled={editingDisabled} onUpdate={updateSceneNode} onUpdateSettings={updateProjectSettings} onDelete={deleteSelected} /> : null}
+        {assistantOpen ? (
+          <AgentPanel
+            open
+            experience={experience}
+            capabilityCount={AGENT_CAPABILITY_MANIFEST.tools.length}
+            revision={projectRevision}
+            sceneName={project.sceneName}
+            selectedName={selectedNode?.name}
+            messages={assistantMessages}
+            pendingPlan={pendingAssistantPlan}
+            busy={assistantBusy}
+            canApply={Boolean(pendingAssistantPlan && pendingAssistantPlan.baseRevision === projectRevision && (!pendingAssistantPlan.batch || mode === 'edit'))}
+            applyBlockedReason={pendingAssistantPlan?.baseRevision !== projectRevision
+              ? 'The project changed after this proposal was prepared. Discard it and request an updated plan.'
+              : pendingAssistantPlan?.batch && mode !== 'edit'
+                ? 'Stop Play mode before applying authored scene changes.'
+                : undefined}
+            applyBlockedReasonCode={pendingAssistantPlan?.baseRevision !== projectRevision ? 'stale' : pendingAssistantPlan?.batch && mode !== 'edit' ? 'play' : undefined}
+            canUndoLast={canUndoLastAssistantPlan}
+            onClose={closeAssistantPanel}
+            onSubmit={submitAssistantPrompt}
+            onApplyPlan={() => { void applyPendingAssistantPlan(); }}
+            onDiscardPlan={discardPendingAssistantPlan}
+            onUndoLast={undoLastAssistantPlan}
+          />
+        ) : inspectorOpen ? <InspectorPanel node={selectedNode} project={project} experience={experience} disabled={editingDisabled} assetStatuses={assetStatuses} onUpdate={updateSceneNode} onUpdateSettings={updateProjectSettings} onRelinkModel={openModelPicker} onDelete={deleteSelected} /> : null}
       </div>
 
       <footer className="statusbar">
@@ -972,16 +1814,32 @@ export default function App() {
         type="file"
         accept=".json,.tjsstudio"
         hidden
+        data-testid="project-file-input"
         onChange={(event) => {
           void handleImport(event.target.files?.[0]);
           event.currentTarget.value = '';
         }}
       />
-      <div className="mobile-recommendation"><Sparkles size={13} /><span>Desktop layout recommended for precise scene editing</span></div>
-      <button type="button" className="mobile-panel-trigger mobile-left" onClick={() => toggleMobilePanel('hierarchy')} aria-label="Toggle objects"><Layers3 size={16} /></button>
-      <button type="button" className="mobile-panel-trigger mobile-right" onClick={() => toggleMobilePanel('inspector')} aria-label="Toggle details"><SlidersHorizontal size={16} /></button>
-      {experience === 'advanced' ? <button type="button" className="mobile-panel-trigger mobile-bottom" onClick={() => toggleMobilePanel('bottom')} aria-label="Toggle assets"><Package size={16} /></button> : null}
-      {experience === 'advanced' ? <button type="button" className="mobile-import-trigger" onClick={() => importInputRef.current?.click()} aria-label="Import project"><Upload size={16} /></button> : null}
+      <input
+        ref={modelInputRef}
+        type="file"
+        accept=".glb,.gltf,model/gltf-binary,model/gltf+json"
+        hidden
+        data-testid="model-file-input"
+        onChange={(event) => {
+          const relinkAssetId = relinkAssetIdRef.current;
+          relinkAssetIdRef.current = null;
+          void handleModelImport(event.target.files?.[0], relinkAssetId);
+          event.currentTarget.value = '';
+        }}
+      />
+      {!bottomOpen && !assistantOpen ? <>
+        <div className="mobile-recommendation"><Sparkles size={13} /><span>Desktop layout recommended for precise scene editing</span></div>
+        <button type="button" className="mobile-panel-trigger mobile-left" onClick={() => toggleMobilePanel('hierarchy')} aria-label="Toggle objects"><Layers3 size={16} /></button>
+        <button type="button" className="mobile-panel-trigger mobile-right" onClick={() => toggleMobilePanel('inspector')} aria-label="Toggle details"><SlidersHorizontal size={16} /></button>
+        {experience === 'advanced' ? <button type="button" className="mobile-panel-trigger mobile-bottom" onClick={() => toggleMobilePanel('bottom')} aria-label="Toggle assets"><Package size={16} /></button> : null}
+      </> : null}
+      {!bottomOpen && !assistantOpen && !previewMode ? <button type="button" className="mobile-agent-trigger" onClick={openAssistantPanel} aria-label={pendingAssistantPlan ? 'Open Studio Assistant · proposal awaiting review' : 'Open Studio Assistant'} data-testid="assistant-mobile-trigger"><span className="agent-trigger-icon"><Sparkles size={18} />{pendingAssistantPlan ? <i aria-hidden="true" /> : null}</span></button> : null}
     </div>
   );
 }

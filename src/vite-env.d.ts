@@ -21,6 +21,15 @@ interface ThreeStudioDiagnostics {
     viewMode: 'scene' | 'game';
     selectedId: string | null;
     objectCount: number;
+    schemaVersion: number;
+    assetCount: number;
+  };
+  assets: {
+    statesByNode: Record<string, 'checking' | 'loading' | 'ready' | 'missing' | 'error'>;
+    readyInstances: number;
+    missingInstances: number;
+    failedInstances: number;
+    cachedModels: number;
   };
   runtime: {
     tick: number;
@@ -33,6 +42,30 @@ interface ThreeStudioDiagnostics {
   };
 }
 
+interface ThreeGameStudioAgentRequest {
+  tool: string;
+  arguments?: Record<string, unknown>;
+  baseRevision?: number;
+  requestId?: string;
+}
+
+interface ThreeGameStudioAgentEvent {
+  type: 'proposal.created' | 'proposal.applied' | 'proposal.dismissed' | 'project.changed';
+  revision: number;
+  label?: string;
+  proposalId?: string;
+  actor?: 'human' | 'assistant' | 'integration';
+}
+
+interface ThreeGameStudioAgentBridge {
+  apiVersion: 1;
+  manifest(): unknown;
+  snapshot(): unknown;
+  request(request: ThreeGameStudioAgentRequest): Promise<unknown>;
+  subscribe(listener: (event: ThreeGameStudioAgentEvent) => void): () => void;
+}
+
 interface Window {
   __THREE_GAME_DIAGNOSTICS__?: ThreeStudioDiagnostics;
+  __THREE_GAME_STUDIO_AGENT__?: ThreeGameStudioAgentBridge;
 }

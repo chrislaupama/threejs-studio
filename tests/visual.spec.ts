@@ -1,5 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import { PNG } from 'pngjs';
+import { makeExternalBufferGltf, makeTriangleGlb } from './fixtures/modelFixtures';
 
 type CanvasSample = {
   ok: boolean;
@@ -10,7 +12,15 @@ type CanvasSample = {
 
 async function openFresh(page: Page) {
   await page.goto('/');
-  await page.evaluate(() => localStorage.clear());
+  await page.evaluate(async () => {
+    localStorage.clear();
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase('threejs-game-studio-assets');
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => resolve();
+    });
+  });
   await page.reload();
   await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
 }
@@ -47,6 +57,12 @@ async function sampleCanvas(page: Page): Promise<CanvasSample> {
     variance,
     colorBuckets: buckets.size,
   };
+}
+
+async function saveCurrentProject(page: Page) {
+  const saveButton = page.getByTestId('save-project');
+  if (await saveButton.isVisible()) await saveButton.click();
+  else await page.evaluate(() => (document.querySelector('[data-testid="save-project"]') as HTMLButtonElement | null)?.click());
 }
 
 test('fresh Essentials journey advances only from real authoring actions', async ({ page }, testInfo) => {
@@ -124,7 +140,7 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
   await page.getByTestId('make-it-move').click();
   await page.locator('.component-menu').getByRole('button', { name: /Float/ }).click();
   await expect(page.locator('[data-component-id]')).toHaveCount(2);
-  await page.getByTestId('save-project').click();
+  await saveCurrentProject(page);
 
   await page.reload();
   await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
@@ -165,4 +181,147 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
   await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position)).toEqual(authoredPlayerPosition);
   await page.keyboard.press('Control+Z');
   await expect(page.locator('[data-component-id]')).toHaveCount(2);
+});
+
+test('self-contained GLB imports through Essentials and survives reload', async ({ page }) => {
+  const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') consoleErrors.push(message.text());
+  });
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await openFresh(page);
+  const fixture = makeTriangleGlb();
+  expect(fixture.byteLength).toBe(996);
+
+  await page.getByTestId('model-file-input').setInputFiles({
+    name: 'qa-triangle.glb',
+    mimeType: 'model/gltf-binary',
+    buffer: fixture,
+  });
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(1);
+  const diagnostics = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
+  expect(diagnostics?.editor).toMatchObject({ schemaVersion: 3, assetCount: 1, objectCount: 14 });
+  expect(diagnostics?.assets.cachedModels).toBe(1);
+  await expect(page.getByTestId('quick-start')).toHaveAttribute('data-step', 'style');
+  expect(await sampleCanvas(page)).toMatchObject({ ok: true });
+
+  await saveCurrentProject(page);
+  await page.reload();
+  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 1);
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.assetCount)).toBe(1);
+  expect(consoleErrors).toEqual([]);
+  expect(pageErrors).toEqual([]);
+});
+
+test('Advanced models reuse GPU resources, recover missing bytes, and embed in builds', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes('desktop'), 'Dense asset lifecycle coverage runs once on desktop.');
+  const fixture = makeTriangleGlb();
+  await openFresh(page);
+  await page.getByTestId('model-file-input').setInputFiles({
+    name: 'qa-triangle.glb',
+    mimeType: 'model/gltf-binary',
+    buffer: fixture,
+  });
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(1);
+  const geometryCount = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.renderer.geometries ?? 0);
+
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
+  await page.getByRole('button', { name: 'Project assets' }).click();
+  const assetCard = page.locator('[data-asset-id^="model-asset-"]');
+  await expect(assetCard).toHaveCount(1);
+  await assetCard.click();
+  await page.locator('.asset-action-bar').getByRole('button', { name: 'Add to scene' }).click();
+  await page.locator('.asset-action-bar').getByRole('button', { name: 'Add to scene' }).click();
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount ?? 0)).toBe(16);
+  expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.cachedModels)).toBe(1);
+  expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.renderer.geometries)).toBe(geometryCount);
+
+  await page.getByTestId('save-project').click();
+  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-game-studio:project:v3') ?? '{}') as {
+    id: string;
+    assets: Array<{ id: string; revision: number }>;
+  });
+  const storedKey = `${metadata.id}::${metadata.assets[0].id}::${metadata.assets[0].revision}`;
+  await page.evaluate(async ({ key }) => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('threejs-game-studio-assets', 1);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const transaction = request.result.transaction('modelSources', 'readwrite');
+        transaction.objectStore('modelSources').delete(key);
+        transaction.oncomplete = () => { request.result.close(); resolve(); };
+        transaction.onerror = () => reject(transaction.error);
+      };
+    });
+  }, { key: storedKey });
+  await page.reload();
+  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.assets.missingInstances ?? 0) === 3);
+  await expect(page.getByTestId('model-import-status')).toHaveAttribute('data-asset-status', 'missing');
+  await expect(page.getByTestId('model-import-status')).toContainText('needs its source file');
+  await page.getByTestId('build-button').click();
+  await expect(page.getByRole('status')).toContainText('Build failed');
+
+  const chooserPromise = page.waitForEvent('filechooser');
+  await page.getByTestId('model-relink').first().click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({ name: 'qa-triangle.glb', mimeType: 'model/gltf-binary', buffer: fixture });
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
+
+  const packageDownloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'File', exact: true }).click();
+  await page.getByRole('button', { name: 'Export editable project' }).click();
+  const packageDownload = await packageDownloadPromise;
+  const packagePath = await packageDownload.path();
+  expect(packagePath).toBeTruthy();
+  const packageValue = JSON.parse(await readFile(packagePath!, 'utf8')) as {
+    format: string;
+    project: { assets: Array<{ id: string; revision: number }> };
+    assetSources: Array<{ assetId: string; revision: number; base64: string }>;
+  };
+  expect(packageValue.format).toBe('threejs-game-studio-project');
+  expect(packageValue.assetSources).toHaveLength(1);
+  expect(packageValue.assetSources[0].base64).toBe(fixture.toString('base64'));
+
+  const relinkedKey = `${metadata.id}::${packageValue.project.assets[0].id}::${packageValue.project.assets[0].revision}`;
+  await page.evaluate(async ({ key }) => {
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open('threejs-game-studio-assets', 1);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const transaction = request.result.transaction('modelSources', 'readwrite');
+        transaction.objectStore('modelSources').delete(key);
+        transaction.oncomplete = () => { request.result.close(); resolve(); };
+        transaction.onerror = () => reject(transaction.error);
+      };
+    });
+  }, { key: relinkedKey });
+  await page.getByTestId('project-file-input').setInputFiles(packagePath!);
+  await saveCurrentProject(page);
+  await page.reload();
+  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 3);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByTestId('build-button').click();
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  expect(downloadPath).toBeTruthy();
+  const html = await readFile(downloadPath!, 'utf8');
+  expect(html).toContain(`data:model/gltf-binary;base64,${fixture.toString('base64')}`);
+  expect(html).toContain(metadata.assets[0].id);
+});
+
+test('external-resource glTF fails atomically with actionable guidance', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes('desktop'), 'Import error coverage runs once on desktop.');
+  await openFresh(page);
+  await page.getByTestId('model-file-input').setInputFiles({
+    name: 'external.gltf',
+    mimeType: '',
+    buffer: makeExternalBufferGltf(),
+  });
+  await expect(page.getByTestId('model-import-status')).toHaveAttribute('data-asset-status', 'error');
+  await expect(page.getByTestId('model-import-status')).toContainText('external buffer');
+  const diagnostics = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
+  expect(diagnostics?.editor).toMatchObject({ assetCount: 0, objectCount: 13 });
 });
