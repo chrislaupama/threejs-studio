@@ -1,6 +1,6 @@
 /// <reference types="vite/client" />
 
-interface ThreeStudioDiagnostics {
+interface ThreeJSStudioDiagnostics {
   frame: number;
   elapsed: number;
   renderer: {
@@ -46,14 +46,14 @@ interface ThreeStudioDiagnostics {
   };
 }
 
-interface ThreeGameStudioAgentRequest {
+interface ThreeJSStudioAgentRequest {
   tool: string;
   arguments?: Record<string, unknown>;
   baseRevision?: number;
   requestId?: string;
 }
 
-interface ThreeGameStudioAgentEvent {
+interface ThreeJSStudioAgentEvent {
   type: 'proposal.created' | 'proposal.applied' | 'proposal.dismissed' | 'project.changed';
   revision: number;
   label?: string;
@@ -61,15 +61,19 @@ interface ThreeGameStudioAgentEvent {
   actor?: 'human' | 'assistant' | 'integration';
 }
 
-interface ThreeGameStudioAgentBridge {
+interface ThreeJSStudioAgentBridge {
   apiVersion: 1;
   manifest(): unknown;
   snapshot(): unknown;
-  request(request: ThreeGameStudioAgentRequest): Promise<unknown>;
-  subscribe(listener: (event: ThreeGameStudioAgentEvent) => void): () => void;
+  request(request: ThreeJSStudioAgentRequest): Promise<unknown>;
+  subscribe(listener: (event: ThreeJSStudioAgentEvent) => void): () => void;
 }
 
 interface Window {
-  __THREE_GAME_DIAGNOSTICS__?: ThreeStudioDiagnostics;
-  __THREE_GAME_STUDIO_AGENT__?: ThreeGameStudioAgentBridge;
+  __THREEJS_STUDIO_DIAGNOSTICS__?: ThreeJSStudioDiagnostics;
+  /** @deprecated Use __THREEJS_STUDIO_DIAGNOSTICS__. */
+  __THREE_GAME_DIAGNOSTICS__?: ThreeJSStudioDiagnostics;
+  __THREEJS_STUDIO_AGENT__?: ThreeJSStudioAgentBridge;
+  /** @deprecated Use __THREEJS_STUDIO_AGENT__. */
+  __THREE_GAME_STUDIO_AGENT__?: ThreeJSStudioAgentBridge;
 }

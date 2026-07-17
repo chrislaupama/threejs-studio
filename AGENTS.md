@@ -1,4 +1,4 @@
-# ThreeJS Game Studio contributor contract
+# ThreeJS Studio contributor contract
 
 ## AI parity is a shipping requirement
 

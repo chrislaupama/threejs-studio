@@ -1,8 +1,8 @@
-# ThreeJS Game Studio — AI Authoring Architecture
+# ThreeJS Studio — AI Authoring Architecture
 
 ## Status at a glance
 
-ThreeJS Game Studio is being built as an AI-native editor, not as a human editor with screen automation added later. Human controls, the built-in assistant, and future external agents are expected to operate on the same serializable `ProjectDocument` through the same typed authoring capabilities.
+ThreeJS Studio is being built as an AI-native editor, not as a human editor with screen automation added later. Human controls, the built-in assistant, and future external agents are expected to operate on the same serializable `ProjectDocument` through the same typed authoring capabilities.
 
 The current milestone ships:
 
@@ -11,7 +11,7 @@ The current milestone ships:
 - A local Guided Assistant that turns a deliberately limited set of plain-language requests or structured tool JSON into reviewable proposals. It is a deterministic planner, not a model-backed AI service.
 - A proposal surface that shows each planned call before any write is applied. Accepted pure project-tool plans validate atomically and enter the editor as one history step.
 - Fourteen browser-host definitions for editor-only capabilities such as selection, viewport controls, Play/Stop, history, console, layout, save/export/build, and user-mediated import requests.
-- A trusted same-page integration bridge at `window.__THREE_GAME_STUDIO_AGENT__` with API version 1. It exposes manifest discovery, a cloned project/editor snapshot, revision-checked tool requests, and event subscription without exposing React state, DOM nodes, or Three.js objects.
+- A trusted same-page integration bridge at `window.__THREEJS_STUDIO_AGENT__` with API version 1. It exposes manifest discovery, a cloned project/editor snapshot, revision-checked tool requests, and event subscription without exposing React state, DOM nodes, or Three.js objects. The pre-rename `window.__THREE_GAME_STUDIO_AGENT__` name remains a deprecated alias so existing integrations do not break.
 - Contract tests for project-tool immutability, validation, capability metadata, hierarchy safety, contextual approvals, and representative authoring domains.
 
 The current milestone does **not** ship an MCP server, remote transport, cloud model, OpenAI API integration, or hidden provider credentials. Those consume the same contract in later phases.
@@ -63,7 +63,7 @@ The durable project model is the trust boundary:
 
 ## Capability contract
 
-The capability protocol is currently `threejs-game-studio.authoring` version 1 over project schema v4. The manifest contains 32 tools: 18 pure project tools and 14 mounted-editor host tools. Tool names use the `studio_` namespace. Each definition advertises:
+The canonical capability protocol is `threejs-studio.authoring` version 1 over project schema v4. The manifest advertises `threejs-game-studio.authoring` as a compatibility protocol for integrations created before the ThreeJS Studio rename. It contains 32 tools: 18 pure project tools and 14 mounted-editor host tools. Tool names use the stable `studio_` namespace. Each definition advertises:
 
 - Stable name, title, and description.
 - Domain and declared scopes.
@@ -150,7 +150,7 @@ The local milestone's in-browser revision guard is the beginning of this contrac
 The browser bridge is an integration seam for trusted same-page code and automated verification. It exposes cloned data and typed operations rather than UI internals:
 
 ```ts
-window.__THREE_GAME_STUDIO_AGENT__ = {
+window.__THREEJS_STUDIO_AGENT__ = {
   apiVersion: 1,
   manifest(),
   snapshot(),
@@ -158,6 +158,8 @@ window.__THREE_GAME_STUDIO_AGENT__ = {
   subscribe(listener), // returns unsubscribe
 };
 ```
+
+The deprecated `window.__THREE_GAME_STUDIO_AGENT__` global points to the same bridge object during the compatibility window. New integrations must use the canonical ThreeJS Studio global and protocol.
 
 Read requests return a structured `completed` result. A mutating bridge request does not silently edit the project: it returns `approval_required`, opens the matching proposal in the Assistant, and waits for the user to Apply or Discard it. Subscribers receive bounded events for proposal creation/application/dismissal and project revision changes.
 

@@ -5,7 +5,7 @@ import './styles.css';
 
 const root = document.getElementById('root');
 
-if (!root) throw new Error('ThreeJS Game Studio root element is missing');
+if (!root) throw new Error('ThreeJS Studio root element is missing');
 
 createRoot(root).render(
   <StrictMode>

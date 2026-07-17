@@ -32,7 +32,7 @@ function parseArgs(argv) {
     else if (value === '-h' || value === '--help') {
       console.log(
         'Usage: inspect-threejs-canvas.mjs [--url URL] [--out DIR] [--mobile] [--wait MS] [--state NAME] [--seed N]\n' +
-          '  --state/--seed drive window.__THREE_GAME_TEST_HOOKS__ (setState/seed) before capture\n' +
+          '  --state/--seed drive window.__THREEJS_STUDIO_TEST_HOOKS__ (setState/seed) before capture\n' +
           '  so specific game states can be measured deterministically.',
       );
       process.exit(0);
@@ -164,7 +164,7 @@ async function sampleCanvas(page, mode) {
       drawingBuffer: canvas
         ? { width: canvas.width, height: canvas.height }
         : null,
-      game: window.__THREE_GAME_DIAGNOSTICS__ ?? null,
+      game: window.__THREEJS_STUDIO_DIAGNOSTICS__ ?? null,
     };
   });
 
@@ -205,7 +205,8 @@ async function main() {
 
   if (args.state || args.seed !== undefined) {
     const applied = await page.evaluate(({ seed, state }) => {
-      const hooks = window.__THREE_GAME_TEST_HOOKS__;
+      // Preserve the pre-rename hook as a deprecated fallback for existing harnesses.
+      const hooks = window.__THREEJS_STUDIO_TEST_HOOKS__ ?? window.__THREE_GAME_TEST_HOOKS__;
       if (!hooks) return false;
       if (typeof seed === 'number') hooks.seed?.(seed);
       if (state) hooks.setState?.(state);
@@ -213,7 +214,7 @@ async function main() {
     }, { seed: args.seed, state: args.state });
     if (!applied) {
       console.error(
-        'warning: --state/--seed requested but __THREE_GAME_TEST_HOOKS__ is not defined; capturing the current state instead',
+        'warning: --state/--seed requested but __THREEJS_STUDIO_TEST_HOOKS__ is not defined; capturing the current state instead',
       );
     }
   }

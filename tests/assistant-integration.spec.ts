@@ -44,21 +44,21 @@ async function openFresh(page: Page) {
   await page.goto('/');
   await page.evaluate(async () => {
     localStorage.clear();
-    await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.deleteDatabase('threejs-game-studio-assets');
+    await Promise.all(['threejs-studio-assets', 'threejs-game-studio-assets'].map((databaseName) => new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(databaseName);
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
       request.onblocked = () => resolve();
-    });
+    })));
   });
   await page.reload();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
-  await page.waitForFunction(() => (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__?.apiVersion === 1);
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.frame ?? 0) > 10);
+  await page.waitForFunction(() => (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__?.apiVersion === 1);
 }
 
 async function snapshot(page: Page): Promise<StudioProjectSnapshot> {
   return page.evaluate(async () => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     return await bridge.snapshot();
   });
@@ -105,11 +105,11 @@ test('Assistant proposal does not mutate until approval, applies atomically, and
   const proposed = await snapshot(page);
   expect(proposed.revision).toBe(before.revision);
   expect(proposed.project.nodes).toEqual(before.project.nodes);
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
 
   await page.getByTestId('assistant-approve').click();
   await expect(proposal).toBeHidden();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(14);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(14);
 
   const applied = await snapshot(page);
   expect(applied.revision).toBeGreaterThan(before.revision);
@@ -124,7 +124,7 @@ test('Assistant proposal does not mutate until approval, applies atomically, and
   // One Undo must remove both tool calls. If the calls entered history
   // separately, the object would remain after this first Undo.
   await page.getByTestId('assistant-undo').click();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
   const undone = await snapshot(page);
   expect(undone.project.nodes.some((node) => node.name === 'Enemy')).toBe(false);
   expect(undone.revision).toBeGreaterThan(applied.revision);
@@ -232,7 +232,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   await openFresh(page);
 
   const contract = await page.evaluate(async () => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     const unsubscribe = bridge.subscribe(() => undefined);
     const manifest = await bridge.manifest();
@@ -240,6 +240,8 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
     unsubscribe();
     return {
       apiVersion: bridge.apiVersion,
+      legacyAlias: (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__ === bridge,
+      diagnosticsAlias: window.__THREE_GAME_DIAGNOSTICS__ === window.__THREEJS_STUDIO_DIAGNOSTICS__,
       manifest,
       current,
       methods: {
@@ -254,6 +256,8 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
 
   expect(contract).toMatchObject({
     apiVersion: 1,
+    legacyAlias: true,
+    diagnosticsAlias: true,
     methods: {
       manifest: 'function',
       snapshot: 'function',
@@ -262,7 +266,9 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
       unsubscribe: 'function',
     },
     manifest: {
-      protocol: 'threejs-game-studio.authoring',
+      protocol: 'threejs-studio.authoring',
+      compatibleProtocols: ['threejs-game-studio.authoring'],
+      product: { name: 'ThreeJS Studio', url: 'https://threejs.studio' },
       protocolVersion: 1,
       tools: expect.arrayContaining([
         expect.objectContaining({ name: 'studio_get_project_summary', readOnly: true }),
@@ -278,7 +284,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   });
 
   const readResult = await page.evaluate(async ({ baseRevision }) => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     return bridge.request({
       tool: 'studio_get_project_summary',
@@ -291,7 +297,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   await expect(page.getByTestId('assistant-proposal')).toHaveCount(0);
 
   const mutationResults = await page.evaluate(async ({ baseRevision }) => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     return Promise.all([
       bridge.request({
@@ -324,7 +330,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   const proposal = page.getByTestId('assistant-proposal');
   await expect(proposal).toBeVisible();
   await expect(proposal).toHaveAttribute('data-proposal-id', (mutationResult as { proposalId: string }).proposalId);
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
 
   // A human edit after planning makes the proposal stale. The Assistant must
   // preserve the human change and refuse to apply the old bridge plan.
@@ -351,7 +357,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
     Object.defineProperty(viewport, 'requestFullscreen', { configurable: true, value: () => pendingFullscreen });
   });
   const asyncHostResult = await page.evaluate(async ({ baseRevision }) => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     return bridge.request({ tool: 'studio_set_viewport', arguments: { fullscreen: true }, baseRevision, requestId: 'qa-async-fullscreen' });
   }, { baseRevision: afterDismiss.revision });
@@ -359,7 +365,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   await page.getByTestId('assistant-approve').click();
   await expect(page.getByTestId('assistant-dismiss')).toBeDisabled();
   const duringApplyResult = await page.evaluate(async ({ baseRevision }) => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     return bridge.request({ tool: 'studio_create_group', arguments: { name: 'Must Wait' }, baseRevision, requestId: 'qa-during-apply' });
   }, { baseRevision: afterDismiss.revision });
@@ -379,7 +385,7 @@ test('browser bridge covers Input Action reads, reference guards, sensitive reas
   const request = async (tool: string, argumentsValue: Record<string, unknown>, requestId: string) => {
     const current = await snapshot(page);
     return page.evaluate(async ({ toolName, args, baseRevision, id }) => {
-      const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+      const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
       if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
       return bridge.request({ tool: toolName, arguments: args, baseRevision, requestId: id });
     }, { toolName: tool, args: argumentsValue, baseRevision: current.revision, id: requestId });
@@ -460,7 +466,7 @@ test('browser bridge routes runtime lifecycle and full project reset through exp
   const before = await snapshot(page);
 
   const request = async (tool: string, argumentsValue: Record<string, unknown>, requestId: string) => page.evaluate(async ({ toolName, args, baseRevision, id }) => {
-    const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
     if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
     return bridge.request({ tool: toolName, arguments: args, baseRevision, requestId: id });
   }, { toolName: tool, args: argumentsValue, baseRevision: before.revision, id: requestId });

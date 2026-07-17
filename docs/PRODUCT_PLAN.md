@@ -1,4 +1,4 @@
-# ThreeJS Game Studio — Product Plan
+# ThreeJS Studio — Product Plan
 
 ## Product vision
 
@@ -54,7 +54,7 @@ Verified slice limits: imports are capped at 100 MiB and must be self-contained;
 
 ## AI-native authoring foundation (registry/proposal/bridge slice implemented)
 
-- Versioned `threejs-game-studio.authoring` capability manifest with JSON-compatible input schemas, stable namespaced tools, declared scope metadata, read/write effects, risk levels, reversibility, and approval policies. Scope grants are not authenticated or enforced by the current same-page integration seam. **Implemented.**
+- Versioned `threejs-studio.authoring` capability manifest with JSON-compatible input schemas, stable namespaced tools, declared scope metadata, read/write effects, risk levels, reversibility, and approval policies. The former `threejs-game-studio.authoring` protocol remains declared as a compatibility protocol. Scope grants are not authenticated or enforced by the current same-page integration seam. **Implemented.**
 - Pure, immutable project tools for project/scene inspection, hierarchy and transforms, primitive materials, gameplay components, world/rendering settings, lights/cameras, and existing imported-model instances. Every successful result is validated before it can enter editor history. **Implemented.**
 - Local Guided Assistant with bounded plain-language planning and structured tool-call input, exact-value/contextual-risk proposal review, atomic pure project-tool multi-call validation, stale-revision rejection, one-step Undo, concurrent-proposal reservation, and normal autosave/viewport reconciliation. Project and editor-host mutations are reviewed separately, with host actions proposed one at a time. This is deliberately deterministic and not presented as a language model. **Implemented.**
 - Eighteen pure project tools plus fourteen browser-host definitions for project/input inspection and authoring, editor context/diagnostics, selection, viewport, Play/Preview/Step controls, history, console, layout, save/export/build, and user-mediated file-picker requests, producing a 32-tool combined manifest; plus a versioned trusted same-page integration bridge over cloned data. **Implemented.**

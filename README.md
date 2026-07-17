@@ -1,6 +1,8 @@
-# ThreeJS Game Studio
+# ThreeJS Studio
 
-ThreeJS Game Studio is a browser-based game editor built around Three.js. It brings the familiar scene-building workflow of desktop engines to the web: a live 3D viewport, scene hierarchy, component inspector, project assets, edit/play isolation, project persistence, and a playable web export.
+ThreeJS Studio is a browser-based game editor built around Three.js. It brings the familiar scene-building workflow of desktop engines to the web: a live 3D viewport, scene hierarchy, component inspector, project assets, edit/play isolation, project persistence, and a playable web export.
+
+Canonical website: [threejs.studio](https://threejs.studio) · Repository: [chrislaupama/threejs-studio](https://github.com/chrislaupama/threejs-studio)
 
 This repository contains a complete editor vertical slice with progressive disclosure: first-time creators start in **Essentials**, while experienced users can reveal the full **Advanced** workspace without changing or downgrading project data.
 

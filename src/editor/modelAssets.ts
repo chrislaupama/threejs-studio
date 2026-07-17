@@ -284,7 +284,7 @@ function classifyLoaderError(error: unknown): ModelImportError {
   const detail = message ? ` ${message.slice(0, 180)}` : '';
   return new ModelImportError(
     'invalid-model',
-    `ThreeJS Game Studio could not read this glTF model.${detail}`,
+    `ThreeJS Studio could not read this glTF model.${detail}`,
     error instanceof Error ? { cause: error } : undefined,
   );
 }

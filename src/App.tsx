@@ -102,14 +102,17 @@ import type {
 } from './editor/types';
 import { ViewportEngine } from './editor/ViewportEngine';
 
-const STORAGE_KEY = 'threejs-game-studio:project:v4';
+const STORAGE_KEY = 'threejs-studio:project:v4';
 const LEGACY_STORAGE_KEYS = [
+  'threejs-game-studio:project:v4',
   'threejs-game-studio:project:v3',
   'threejs-game-studio:project:v2',
   'threejs-game-studio:project:v1',
 ];
-const EXPERIENCE_KEY = 'threejs-game-studio:experience';
-const QUICK_START_KEY = 'threejs-game-studio:quick-start';
+const EXPERIENCE_KEY = 'threejs-studio:experience';
+const LEGACY_EXPERIENCE_KEY = 'threejs-game-studio:experience';
+const QUICK_START_KEY = 'threejs-studio:quick-start';
+const LEGACY_QUICK_START_KEY = 'threejs-game-studio:quick-start';
 const MAX_HISTORY = 60;
 
 type ExperienceLevel = 'essentials' | 'advanced';
@@ -167,7 +170,7 @@ interface AssistantCommitMarker {
   actor: EditorActor;
 }
 
-type EditorActor = NonNullable<ThreeGameStudioAgentEvent['actor']>;
+type EditorActor = NonNullable<ThreeJSStudioAgentEvent['actor']>;
 
 function loadInitialProject() {
   for (const key of [STORAGE_KEY, ...LEGACY_STORAGE_KEYS]) {
@@ -189,7 +192,10 @@ function loadInitialProject() {
 
 function loadExperience(): ExperienceLevel {
   try {
-    return localStorage.getItem(EXPERIENCE_KEY) === 'advanced' ? 'advanced' : 'essentials';
+    const current = localStorage.getItem(EXPERIENCE_KEY);
+    const stored = current ?? localStorage.getItem(LEGACY_EXPERIENCE_KEY);
+    if (current === null && stored !== null) localStorage.setItem(EXPERIENCE_KEY, stored);
+    return stored === 'advanced' ? 'advanced' : 'essentials';
   } catch {
     return 'essentials';
   }
@@ -197,7 +203,10 @@ function loadExperience(): ExperienceLevel {
 
 function loadQuickStart(): QuickStartProgress {
   try {
-    const value = JSON.parse(localStorage.getItem(QUICK_START_KEY) ?? '{}') as Partial<QuickStartProgress>;
+    const current = localStorage.getItem(QUICK_START_KEY);
+    const stored = current ?? localStorage.getItem(LEGACY_QUICK_START_KEY);
+    if (current === null && stored !== null) localStorage.setItem(QUICK_START_KEY, stored);
+    const value = JSON.parse(stored ?? '{}') as Partial<QuickStartProgress>;
     return {
       added: value.added === true,
       styled: value.styled === true,
@@ -357,9 +366,9 @@ export default function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const relinkAssetIdRef = useRef<string | null>(null);
-  const assistantSubscribersRef = useRef(new Set<(event: ThreeGameStudioAgentEvent) => void>());
+  const assistantSubscribersRef = useRef(new Set<(event: ThreeJSStudioAgentEvent) => void>());
   const assistantSnapshotRef = useRef<() => unknown>(() => ({ revision: 0 }));
-  const assistantRequestRef = useRef<(request: ThreeGameStudioAgentRequest) => Promise<unknown>>(async () => ({ status: 'unavailable' }));
+  const assistantRequestRef = useRef<(request: ThreeJSStudioAgentRequest) => Promise<unknown>>(async () => ({ status: 'unavailable' }));
 
   const selectedNode = getNode(project, selectedId);
   const editingDisabled = mode !== 'edit';
@@ -419,7 +428,7 @@ export default function App() {
     return next;
   }, []);
 
-  const publishAssistantEvent = useCallback((event: ThreeGameStudioAgentEvent) => {
+  const publishAssistantEvent = useCallback((event: ThreeJSStudioAgentEvent) => {
     for (const subscriber of assistantSubscribersRef.current) {
       try {
         subscriber(structuredClone(event));
@@ -1122,9 +1131,9 @@ export default function App() {
 
     if (toolName === 'studio_get_diagnostics') {
       const available = {
-        editor: window.__THREE_GAME_DIAGNOSTICS__?.editor ?? { mode: modeRef.current, viewMode, selectedId, objectCount: projectRef.current.nodes.length, schemaVersion: projectRef.current.schemaVersion, assetCount: projectRef.current.assets.length },
-        renderer: window.__THREE_GAME_DIAGNOSTICS__?.renderer ?? structuredClone(stats),
-        assets: window.__THREE_GAME_DIAGNOSTICS__?.assets ?? { statuses: structuredClone(assetStatuses) },
+        editor: window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor ?? { mode: modeRef.current, viewMode, selectedId, objectCount: projectRef.current.nodes.length, schemaVersion: projectRef.current.schemaVersion, assetCount: projectRef.current.assets.length },
+        renderer: window.__THREEJS_STUDIO_DIAGNOSTICS__?.renderer ?? structuredClone(stats),
+        assets: window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets ?? { statuses: structuredClone(assetStatuses) },
         history: { revision: projectRevisionRef.current, undoDepth: undoStack.length, redoDepth: redoStack.length, dirty },
       };
       const sections = args.sections as Array<keyof typeof available> | undefined;
@@ -1529,7 +1538,7 @@ export default function App() {
   }, [assistantOpen, bottomOpen, bottomTab, experience, gridVisible, hierarchyOpen, inspectorOpen, prepareAssistantCalls, previewMode, redoStack.length, selectedId, snap, space, stats, tool, undoStack.length, viewMode]);
 
   useEffect(() => {
-    const bridge: ThreeGameStudioAgentBridge = {
+    const bridge: ThreeJSStudioAgentBridge = {
       apiVersion: 1,
       manifest: () => structuredClone(AGENT_CAPABILITY_MANIFEST),
       snapshot: () => assistantSnapshotRef.current(),
@@ -1540,8 +1549,10 @@ export default function App() {
         return () => assistantSubscribersRef.current.delete(listener);
       },
     };
+    window.__THREEJS_STUDIO_AGENT__ = bridge;
     window.__THREE_GAME_STUDIO_AGENT__ = bridge;
     return () => {
+      if (window.__THREEJS_STUDIO_AGENT__ === bridge) delete window.__THREEJS_STUDIO_AGENT__;
       if (window.__THREE_GAME_STUDIO_AGENT__ === bridge) delete window.__THREE_GAME_STUDIO_AGENT__;
       assistantSubscribersRef.current.clear();
       pendingAssistantPlanRef.current = null;
@@ -1567,7 +1578,7 @@ export default function App() {
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark"><Boxes size={18} strokeWidth={1.8} /></span>
-          <span className="brand-copy"><strong>ThreeJS</strong><span>Game Studio</span></span>
+          <span className="brand-copy"><strong>ThreeJS</strong><span>Studio</span></span>
         </div>
         <nav className="app-menu-bar" aria-label="Application menu">
           {visibleMenus.map((menu) => (
@@ -1651,10 +1662,10 @@ export default function App() {
       ) : null}
       {openMenu === 'help' ? (
         <div className="app-menu-popover menu-help">
-          <span className="menu-heading">ThreeJS Game Studio</span>
+          <span className="menu-heading">ThreeJS Studio</span>
           <MenuItem icon={<Sparkles size={14} />} label="Resume Quick Start" onClick={() => { setQuickStart((current) => ({ ...current, dismissed: false })); changeExperience('essentials'); closeMenus(); }} />
           <MenuItem icon={<Command size={14} />} label="Keyboard shortcuts" onClick={() => { setCommandPaletteOpen(true); closeMenus(); }} />
-          <MenuItem icon={<Globe2 size={14} />} label="About this build" onClick={() => { showToast('ThreeJS Game Studio · Editor foundation v0.2'); closeMenus(); }} />
+          <MenuItem icon={<Globe2 size={14} />} label="About this build" onClick={() => { showToast('ThreeJS Studio · threejs.studio · Editor foundation v0.2'); closeMenus(); }} />
         </div>
       ) : null}
 

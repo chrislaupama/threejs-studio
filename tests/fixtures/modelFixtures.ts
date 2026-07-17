@@ -30,7 +30,7 @@ export function makeTriangleGlb(): Buffer {
   const indices = uint16Buffer([0, 1, 2]);
   const binaryPayload = Buffer.concat([positions, normals, indices]);
   const gltf = {
-    asset: { version: '2.0', generator: 'ThreeJS Game Studio QA Fixture' },
+    asset: { version: '2.0', generator: 'ThreeJS Studio QA Fixture' },
     scene: 0,
     scenes: [{ nodes: [0] }],
     nodes: [{ name: 'QA Triangle', mesh: 0 }],

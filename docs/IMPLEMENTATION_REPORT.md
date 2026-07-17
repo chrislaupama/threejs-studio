@@ -1,10 +1,16 @@
-# ThreeJS Game Studio — Implementation Report
+# ThreeJS Studio — Implementation Report
 
 ## Outcome
 
-Implemented and extended the first functional ThreeJS Game Studio editor vertical slice. The result is a React + TypeScript + Vite web application with a direct Three.js viewport, validated schema-v4 project model, progressive Essentials/Advanced authoring, project-level named Input Actions, stackable gameplay components, hierarchy, component inspector, built-in and imported model assets, command history, isolated edit/play modes, revisioned browser persistence, portable project import/export, a single-HTML online game build, responsive layouts, diagnostics, an AI-native typed authoring/proposal/browser-bridge foundation, and browser QA.
+Implemented and extended the first functional ThreeJS Studio editor vertical slice. The result is a React + TypeScript + Vite web application with a direct Three.js viewport, validated schema-v4 project model, progressive Essentials/Advanced authoring, project-level named Input Actions, stackable gameplay components, hierarchy, component inspector, built-in and imported model assets, command history, isolated edit/play modes, revisioned browser persistence, portable project import/export, a single-HTML online game build, responsive layouts, diagnostics, an AI-native typed authoring/proposal/browser-bridge foundation, and browser QA.
 
 This report does not claim that the current milestone is a complete Unity/Unreal replacement, a premium AAA game, an externally connectable MCP server, or a model-backed AI service. It establishes the editor/runtime architecture, complete authoring loop, first production asset-pipeline slice, and shared human/agent capability seam needed for later prefab, physics, scripting, animation, audio, UI-canvas, MCP, model-provider, and offline-packaging milestones.
+
+## ThreeJS Studio identity migration
+
+- Renamed the product, package, repository metadata, browser title, generated build badge, and public documentation to **ThreeJS Studio**, with [threejs.studio](https://threejs.studio) as the canonical website.
+- Moved browser persistence to `threejs-studio:*`, model sources to `threejs-studio-assets`, portable packages to `threejs-studio-project`, and the AI contract to `threejs-studio.authoring` without stranding existing projects or integrations.
+- Legacy localStorage records, IndexedDB model sources, portable project packages, protocol discovery, browser bridge globals, editor diagnostics, and standalone-runtime diagnostics remain readable through documented compatibility paths. New writes use the canonical ThreeJS Studio identity.
 
 ## Iteration 5 — Named Input Actions v1
 
@@ -18,13 +24,13 @@ This report does not claim that the current milestone is a complete Unity/Unreal
 
 ## Iteration 4 — AI-native authoring registry, proposals, and browser bridge
 
-- Added a versioned `threejs-game-studio.authoring` capability manifest for project schema v4. Every advertised tool includes a JSON-compatible input schema, domain, declared scope metadata, read/write effect, risk level, approval policy, reversibility, and rationale.
+- Added a versioned `threejs-studio.authoring` capability manifest for project schema v4, with the former `threejs-game-studio.authoring` identifier advertised for compatibility. Every advertised tool includes a JSON-compatible input schema, domain, declared scope metadata, read/write effect, risk level, approval policy, reversibility, and rationale.
 - Added 15 pure project tools covering project/scene inspection, complete starter-project reset, scene creation and hierarchy, transforms, primitive PBR materials, visibility/locks/shadows, gameplay-component add/update/remove, world/rendering settings, light/camera properties, and instances of existing imported models.
 - Project tools operate on clones, reject unknown/invalid properties, use stable node/asset/component IDs, and validate the complete resulting project. A failed pure project-tool multi-call plan returns the original project rather than a partial mutation.
 - Added a local Guided Assistant that understands a bounded set of scene summaries, creation, transform, material, gameplay, visibility, duplication, deletion, and background requests. It can also parse structured tool-call JSON. It is deterministic and requires no network or API key; it is not described as a language model.
 - Added a responsive Studio Assistant panel with current context/revision, suggested requests, transcript, exact-value/contextual-risk review, explicit tool proposal, effects, Discard, and Apply controls. Read-only calls can return immediately; writes remain reviewable and accepted pure project-tool batches enter normal history as one Undo step. One mutation proposal is reserved synchronously so concurrent requests cannot orphan an approval. Project writes and editor-host actions are reviewed separately, and mutating host actions are proposed one at a time.
 - Added 14 browser-host tool definitions for editor context/diagnostics, selection, viewport state, Play/Pause/Resume/Step/Stop/Preview controls, history, console, layout, save/export/build, and user-mediated import requests, producing a 29-tool combined manifest. Host definitions are separate from pure project mutation because they depend on live browser/editor state.
-- Added `window.__THREE_GAME_STUDIO_AGENT__`, a trusted same-page integration bridge with API version 1 over cloned project/editor data. Its `manifest`, `snapshot`, `request`, and `subscribe` contract supports capability discovery, revision-checked tool requests, visible `approval_required` proposals, and proposal/project lifecycle events without exposing React setters, DOM nodes, Three.js instances, raw IndexedDB handles, object URLs, credentials, or arbitrary JavaScript execution. Its declared scopes are advisory metadata in this milestone; the bridge does not authenticate callers or enforce grants.
+- Added `window.__THREEJS_STUDIO_AGENT__`, a trusted same-page integration bridge with API version 1 over cloned project/editor data. Its `manifest`, `snapshot`, `request`, and `subscribe` contract supports capability discovery, revision-checked tool requests, visible `approval_required` proposals, and proposal/project lifecycle events without exposing React setters, DOM nodes, Three.js instances, raw IndexedDB handles, object URLs, credentials, or arbitrary JavaScript execution. The former `window.__THREE_GAME_STUDIO_AGENT__` global remains a deprecated alias to the same object. Its declared scopes are advisory metadata in this milestone; the bridge does not authenticate callers or enforce grants.
 - Added an in-session monotonic authoring revision. Plans capture their base revision and stale plans are rejected after intervening human, agent, history, or import changes instead of silently overwriting them.
 - Added contextual approval metadata. Destructive subtree deletion always requires approval; locked/root/hierarchy/camera/light changes can escalate to required approval. The built-in proposal UI currently gives every write a visible review boundary.
 - Added `AGENTS.md` as an ongoing shipping rule: every new durable human authoring surface must gain a matching typed capability, normal history/autosave integration, contract coverage, and a browser-visible Undo test.
@@ -136,7 +142,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - `tests/input-actions.spec.ts`: defaults, immutable operations, reference protection, normalized resolution, malformed/dangling validation, and generated-runtime input contract.
 - `tests/agent-tools.spec.ts`: capability stability, immutable inspection, scene/material/gameplay/world/model coverage, atomic invalid calls, and contextual approval boundaries.
 - `tests/assistant-integration.spec.ts`: desktop/mobile Assistant entry points, no-mutation-before-approval, atomic pure project-tool Apply, single-step Undo, and browser-bridge manifest/snapshot/request/subscription coverage.
-- `tests/fixtures/modelFixtures.ts`: deterministic 996-byte GLB and external-resource glTF fixtures generated in memory.
+- `tests/fixtures/modelFixtures.ts`: deterministic 988-byte GLB and external-resource glTF fixtures generated in memory.
 - `tests/visual.spec.ts`: real-action Essentials journey, Play isolation, stacked components, named-action rebinding/reset/build/diagnostics/Undo, model import/persistence/reuse/missing recovery/relink/package/build, keyboard input, pause/step/stop, and nonblank canvas smoke tests.
 - `tests/visual-regression.spec.ts` plus snapshots: deterministic Essentials, Advanced, imported-model viewport, and Advanced model-authoring desktop/mobile baselines.
 - `README.md` and `docs/PRODUCT_PLAN.md`: usage, architecture, boundaries, and roadmap.
@@ -158,7 +164,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 ## QA/release evidence
 
 - `npm run build`: pass with Vite 8.1.5 and TypeScript 6.0.3.
-- Complete browser suite: 63 passed, 11 intentionally skipped desktop-only duplicate cases on mobile. The suite runs 74 cases across desktop Chromium and mobile WebKit; AI tool/bridge/approval/concurrent-and-in-flight proposal ownership/stale-plan/runtime/reset/atomic-Undo/prompt-history/destructive-review contracts, direct Input Action bridge coverage, migration, components, model persistence, shared-resource, missing/relink, portable-package, executable standalone-build input/cleanup, import-failure, and twelve active visual-baseline checks are covered.
+- Complete browser suite: 66 passed, 12 intentionally skipped desktop-only duplicate cases on mobile. The suite runs 78 cases across desktop Chromium and mobile WebKit; canonical identity and legacy persistence/protocol/global compatibility, AI tool/bridge/approval/concurrent-and-in-flight proposal ownership/stale-plan/runtime/reset/atomic-Undo/prompt-history/destructive-review contracts, direct Input Action bridge coverage, migrations, components, model persistence, shared-resource, missing/relink, portable-package, executable standalone-build input/cleanup, import-failure, and twelve active visual-baseline checks are covered.
 - Production preview URL tested: `http://127.0.0.1:4188/`.
 - Production interaction: Play → Escape restored `mode-edit`; Build downloaded `starter-project-web.html` without failure.
 - Browser application errors: none. Page errors: none. Headless Chromium emitted only driver-level `ReadPixels` performance notices while screenshots were captured.

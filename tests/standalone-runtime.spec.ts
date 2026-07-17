@@ -53,13 +53,25 @@ test('downloaded HTML boots offline-routed Three.js and runs authored input with
   if (!rebound) throw new Error('Could not create the standalone runtime fixture.');
 
   await page.setContent(buildRuntimeHtml(rebound), { waitUntil: 'load' });
-  await page.waitForFunction(() => Boolean((window as unknown as { __THREE_GAME_RUNTIME_DIAGNOSTICS__?: RuntimeDiagnostics }).__THREE_GAME_RUNTIME_DIAGNOSTICS__));
+  await page.waitForFunction(() => Boolean((window as unknown as { __THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__?: RuntimeDiagnostics }).__THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__));
   const position = () => page.evaluate(() => (
-    window as unknown as { __THREE_GAME_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics }
-  ).__THREE_GAME_RUNTIME_DIAGNOSTICS__.getNodePosition('player-rig'));
+    window as unknown as { __THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics }
+  ).__THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__.getNodePosition('player-rig'));
   const pressedCodes = () => page.evaluate(() => (
-    window as unknown as { __THREE_GAME_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics }
-  ).__THREE_GAME_RUNTIME_DIAGNOSTICS__.getPressedCodes());
+    window as unknown as { __THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics }
+  ).__THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__.getPressedCodes());
+
+  expect(await page.evaluate(() => (
+    window as unknown as {
+      __THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics;
+      __THREE_GAME_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics;
+    }
+  ).__THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__ === (
+    window as unknown as {
+      __THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics;
+      __THREE_GAME_RUNTIME_DIAGNOSTICS__: RuntimeDiagnostics;
+    }
+  ).__THREE_GAME_RUNTIME_DIAGNOSTICS__)).toBe(true);
 
   const before = await position();
   expect(before).not.toBeNull();

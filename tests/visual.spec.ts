@@ -14,15 +14,15 @@ async function openFresh(page: Page) {
   await page.goto('/');
   await page.evaluate(async () => {
     localStorage.clear();
-    await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.deleteDatabase('threejs-game-studio-assets');
+    await Promise.all(['threejs-studio-assets', 'threejs-game-studio-assets'].map((databaseName) => new Promise<void>((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(databaseName);
       request.onsuccess = () => resolve();
       request.onerror = () => reject(request.error);
       request.onblocked = () => resolve();
-    });
+    })));
   });
   await page.reload();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.frame ?? 0) > 10);
 }
 
 async function sampleCanvas(page: Page): Promise<CanvasSample> {
@@ -65,6 +65,67 @@ async function saveCurrentProject(page: Page) {
   else await page.evaluate(() => (document.querySelector('[data-testid="save-project"]') as HTMLButtonElement | null)?.click());
 }
 
+async function moveAssetSourceToLegacyDatabase(page: Page, key: string) {
+  await page.evaluate(async ({ assetKey }) => {
+    const openDatabase = (databaseName: string) => new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open(databaseName, 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains('modelSources')) {
+          const store = request.result.createObjectStore('modelSources', { keyPath: 'key' });
+          store.createIndex('projectId', 'projectId', { unique: false });
+        }
+      };
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const complete = (transaction: IDBTransaction) => new Promise<void>((resolve, reject) => {
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    const canonical = await openDatabase('threejs-studio-assets');
+    const readTransaction = canonical.transaction('modelSources', 'readonly');
+    const record = await new Promise<unknown>((resolve, reject) => {
+      const request = readTransaction.objectStore('modelSources').get(assetKey);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await complete(readTransaction);
+    if (!record) throw new Error('Expected the canonical model source before migration setup.');
+
+    const legacy = await openDatabase('threejs-game-studio-assets');
+    const legacyTransaction = legacy.transaction('modelSources', 'readwrite');
+    legacyTransaction.objectStore('modelSources').put(record);
+    await complete(legacyTransaction);
+    const deleteTransaction = canonical.transaction('modelSources', 'readwrite');
+    deleteTransaction.objectStore('modelSources').delete(assetKey);
+    await complete(deleteTransaction);
+    canonical.close();
+    legacy.close();
+  }, { assetKey: key });
+}
+
+async function getAssetSourceLocations(page: Page, key: string) {
+  return page.evaluate(async ({ assetKey }) => {
+    const hasRecord = (databaseName: string) => new Promise<boolean>((resolve, reject) => {
+      const request = indexedDB.open(databaseName, 1);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const database = request.result;
+        const transaction = database.transaction('modelSources', 'readonly');
+        const getRequest = transaction.objectStore('modelSources').get(assetKey);
+        getRequest.onsuccess = () => resolve(Boolean(getRequest.result));
+        getRequest.onerror = () => reject(getRequest.error);
+        transaction.oncomplete = () => database.close();
+      };
+    });
+    return {
+      canonical: await hasRecord('threejs-studio-assets'),
+      legacy: await hasRecord('threejs-game-studio-assets'),
+    };
+  }, { assetKey: key });
+}
+
 test('fresh Essentials journey advances only from real authoring actions', async ({ page }, testInfo) => {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -79,7 +140,7 @@ test('fresh Essentials journey advances only from real authoring actions', async
   await expect(page.getByTestId('quick-start')).toHaveAttribute('data-step', 'add');
   await expect(page.getByText('Advanced world settings')).toHaveCount(0);
 
-  const diagnostics = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
+  const diagnostics = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__);
   expect(diagnostics?.canvas.clientWidth).toBeGreaterThan(200);
   expect(diagnostics?.canvas.clientHeight).toBeGreaterThan(180);
   expect(diagnostics?.editor.objectCount).toBe(13);
@@ -93,7 +154,7 @@ test('fresh Essentials journey advances only from real authoring actions', async
 
   await page.getByTestId('add-object').click();
   await page.getByTestId('create-box').click();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(14);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(14);
   await expect(page.getByTestId('quick-start')).toHaveAttribute('data-step', 'style');
 
   if (testInfo.project.name.includes('mobile')) {
@@ -110,7 +171,7 @@ test('fresh Essentials journey advances only from real authoring actions', async
   await page.getByTestId('quick-start').getByRole('button', { name: 'Play the game' }).click();
   await expect(studio).toHaveClass(/mode-play/);
   await expect(page.getByTestId('runtime-banner')).toBeVisible();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.mode)).toBe('play');
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.mode)).toBe('play');
 
   const runtimeBox = await page.getByTestId('runtime-banner').boundingBox();
   const viewport = page.viewportSize();
@@ -119,7 +180,7 @@ test('fresh Essentials journey advances only from real authoring actions', async
   await page.keyboard.press('Escape');
   await expect(studio).toHaveClass(/mode-edit/);
   await expect(page.getByTestId('quick-start')).toHaveAttribute('data-step', 'complete');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(14);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(14);
 
   const quickStartBox = await page.getByTestId('quick-start').boundingBox();
   expect(quickStartBox && viewport && quickStartBox.x >= 0 && quickStartBox.y >= 0 && quickStartBox.x + quickStartBox.width <= viewport.width && quickStartBox.y + quickStartBox.height <= viewport.height).toBeTruthy();
@@ -144,7 +205,7 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
   await saveCurrentProject(page);
 
   await page.reload();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.frame ?? 0) > 10);
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.frame ?? 0) > 10);
   await expect(page.getByTestId('studio-app')).toHaveAttribute('data-experience', 'advanced');
   await page.locator('[data-node-id="player-ring"]').click();
   await expect(page.locator('[data-component-id]')).toHaveCount(2);
@@ -154,32 +215,32 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
 
   const authoredPlayerPosition = [0, 1.55, 0];
   await page.getByTestId('play-button').click();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.tick ?? 0)).toBeGreaterThan(2);
-  const beforeMove = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.tick ?? 0)).toBeGreaterThan(2);
+  const beforeMove = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position);
   await page.keyboard.down('w');
   await page.waitForTimeout(500);
   await page.keyboard.up('w');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position[2] ?? 0)).toBeLessThan((beforeMove?.[2] ?? 0) - 0.2);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position[2] ?? 0)).toBeLessThan((beforeMove?.[2] ?? 0) - 0.2);
 
-  const objectCount = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount);
+  const objectCount = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount);
   await page.keyboard.press('Control+K');
   await expect(page.locator('.command-list').getByRole('button', { name: /Create Box/ })).toBeDisabled();
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('studio-app')).toHaveClass(/mode-play/);
   await page.keyboard.press('Control+Z');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount)).toBe(objectCount);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(objectCount);
 
   await page.getByTestId('pause-button').click();
   await page.waitForTimeout(600);
-  const frozenTick = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.tick ?? 0);
+  const frozenTick = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.tick ?? 0);
   await page.waitForTimeout(600);
-  expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.tick ?? 0)).toBe(frozenTick);
+  expect(await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.tick ?? 0)).toBe(frozenTick);
   await page.getByRole('button', { name: 'Step one frame' }).click();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.tick ?? 0)).toBe(frozenTick + 1);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.tick ?? 0)).toBe(frozenTick + 1);
 
   await page.getByTestId('stop-button').click();
   await expect(page.getByTestId('studio-app')).toHaveClass(/mode-edit/);
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position)).toEqual(authoredPlayerPosition);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position)).toEqual(authoredPlayerPosition);
   await page.keyboard.press('Control+Z');
   await expect(page.locator('[data-component-id]')).toHaveCount(2);
 });
@@ -217,33 +278,33 @@ test('Input Actions rebind movement across UI, Play, build, diagnostics, and Und
   await page.getByTestId('experience-toggle').getByRole('button', { name: 'Essentials' }).click();
   await page.getByTestId('play-button').click();
   await expect(page.getByTestId('runtime-banner')).toContainText('I / A / S / D');
-  const before = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position ?? []);
+  const before = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position ?? []);
 
   await page.keyboard.down('w');
   await page.waitForTimeout(350);
   await page.keyboard.up('w');
-  const afterOldKey = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position ?? []);
+  const afterOldKey = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position ?? []);
   expect(Math.abs((afterOldKey[2] ?? 0) - (before[2] ?? 0))).toBeLessThan(0.03);
 
   await page.keyboard.down('i');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.actions['player.move']?.[1])).toBe(1);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.input.actions['player.move']?.[1])).toBe(1);
   await page.waitForTimeout(350);
   await page.keyboard.up('i');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position[2] ?? 0)).toBeLessThan((before[2] ?? 0) - 0.2);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position[2] ?? 0)).toBeLessThan((before[2] ?? 0) - 0.2);
 
   await page.keyboard.down('Control');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.pressedCodes)).toContain('ControlLeft');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.actions['player.move']?.[1])).toBe(1);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.input.pressedCodes)).toContain('ControlLeft');
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.input.actions['player.move']?.[1])).toBe(1);
   await page.keyboard.up('Control');
 
   await page.keyboard.down('i');
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.pressedCodes)).toContain('KeyI');
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.input.pressedCodes)).toContain('KeyI');
   await page.evaluate(() => window.dispatchEvent(new Event('blur')));
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.pressedCodes)).toEqual([]);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.input.pressedCodes)).toEqual([]);
   await page.keyboard.up('i');
 
   await page.getByTestId('stop-button').click();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position)).toEqual([0, 1.55, 0]);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position)).toEqual([0, 1.55, 0]);
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByTestId('build-button').click();
@@ -272,7 +333,7 @@ test('self-contained GLB imports through Essentials and survives reload', async 
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await openFresh(page);
   const fixture = makeTriangleGlb();
-  expect(fixture.byteLength).toBe(996);
+  expect(fixture.byteLength).toBe(988);
 
   await page.getByTestId('model-file-input').setInputFiles({
     name: 'qa-triangle.glb',
@@ -280,10 +341,10 @@ test('self-contained GLB imports through Essentials and survives reload', async 
     buffer: fixture,
   });
   await expect.poll(
-    async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0),
+    async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0),
     { timeout: 10_000 },
   ).toBe(1);
-  const diagnostics = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
+  const diagnostics = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__);
   expect(diagnostics?.editor).toMatchObject({ schemaVersion: 4, assetCount: 1, objectCount: 14 });
   expect(diagnostics?.assets.cachedModels).toBe(1);
   await expect(page.getByTestId('quick-start')).toHaveAttribute('data-step', 'style');
@@ -291,8 +352,8 @@ test('self-contained GLB imports through Essentials and survives reload', async 
 
   await saveCurrentProject(page);
   await page.reload();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 1);
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.assetCount)).toBe(1);
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 1);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.assetCount)).toBe(1);
   expect(consoleErrors).toEqual([]);
   expect(pageErrors).toEqual([]);
 });
@@ -308,10 +369,21 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
     buffer: fixture,
   });
   await expect.poll(
-    async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0),
+    async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0),
     { timeout: 10_000 },
   ).toBe(1);
-  const geometryCount = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.renderer.geometries ?? 0);
+  await page.getByTestId('save-project').click();
+  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-studio:project:v4') ?? '{}') as {
+    id: string;
+    assets: Array<{ id: string; revision: number }>;
+  });
+  const storedKey = `${metadata.id}::${metadata.assets[0].id}::${metadata.assets[0].revision}`;
+  await moveAssetSourceToLegacyDatabase(page, storedKey);
+  expect(await getAssetSourceLocations(page, storedKey)).toEqual({ canonical: false, legacy: true });
+  await page.reload();
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 1);
+  await expect.poll(() => getAssetSourceLocations(page, storedKey)).toEqual({ canonical: true, legacy: false });
+  const geometryCount = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.renderer.geometries ?? 0);
 
   await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
   await page.getByRole('button', { name: 'Project assets' }).click();
@@ -320,20 +392,15 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
   await assetCard.click();
   await page.locator('.asset-action-bar').getByRole('button', { name: 'Add to scene' }).click();
   await page.locator('.asset-action-bar').getByRole('button', { name: 'Add to scene' }).click();
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.editor.objectCount ?? 0)).toBe(16);
-  expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.cachedModels)).toBe(1);
-  expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.renderer.geometries)).toBe(geometryCount);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount ?? 0)).toBe(16);
+  expect(await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.cachedModels)).toBe(1);
+  expect(await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.renderer.geometries)).toBe(geometryCount);
 
   await page.getByTestId('save-project').click();
-  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-game-studio:project:v4') ?? '{}') as {
-    id: string;
-    assets: Array<{ id: string; revision: number }>;
-  });
-  const storedKey = `${metadata.id}::${metadata.assets[0].id}::${metadata.assets[0].revision}`;
   await page.evaluate(async ({ key }) => {
     await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('threejs-game-studio-assets', 1);
+      const request = indexedDB.open('threejs-studio-assets', 1);
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const transaction = request.result.transaction('modelSources', 'readwrite');
@@ -344,7 +411,7 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
     });
   }, { key: storedKey });
   await page.reload();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.assets.missingInstances ?? 0) === 3);
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.missingInstances ?? 0) === 3);
   await expect(page.getByTestId('model-import-status')).toHaveAttribute('data-asset-status', 'missing');
   await expect(page.getByTestId('model-import-status')).toContainText('needs its source file');
   await page.getByTestId('build-button').click();
@@ -354,7 +421,7 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
   await page.getByTestId('model-relink').first().click();
   const chooser = await chooserPromise;
   await chooser.setFiles({ name: 'qa-triangle.glb', mimeType: 'model/gltf-binary', buffer: fixture });
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
+  await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
 
   const packageDownloadPromise = page.waitForEvent('download');
   await page.getByRole('button', { name: 'File', exact: true }).click();
@@ -367,14 +434,14 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
     project: { assets: Array<{ id: string; revision: number }> };
     assetSources: Array<{ assetId: string; revision: number; base64: string }>;
   };
-  expect(packageValue.format).toBe('threejs-game-studio-project');
+  expect(packageValue.format).toBe('threejs-studio-project');
   expect(packageValue.assetSources).toHaveLength(1);
   expect(packageValue.assetSources[0].base64).toBe(fixture.toString('base64'));
 
   const relinkedKey = `${metadata.id}::${packageValue.project.assets[0].id}::${packageValue.project.assets[0].revision}`;
   await page.evaluate(async ({ key }) => {
     await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open('threejs-game-studio-assets', 1);
+      const request = indexedDB.open('threejs-studio-assets', 1);
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const transaction = request.result.transaction('modelSources', 'readwrite');
@@ -387,7 +454,7 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
   await page.getByTestId('project-file-input').setInputFiles(packagePath!);
   await saveCurrentProject(page);
   await page.reload();
-  await page.waitForFunction(() => (window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 3);
+  await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0) === 3);
 
   const downloadPromise = page.waitForEvent('download');
   await page.getByTestId('build-button').click();
@@ -409,6 +476,6 @@ test('external-resource glTF fails atomically with actionable guidance', async (
   });
   await expect(page.getByTestId('model-import-status')).toHaveAttribute('data-asset-status', 'error');
   await expect(page.getByTestId('model-import-status')).toContainText('external buffer');
-  const diagnostics = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
+  const diagnostics = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__);
   expect(diagnostics?.editor).toMatchObject({ assetCount: 0, objectCount: 13 });
 });

@@ -1004,7 +1004,7 @@ export function buildRuntimeHtml(project: ProjectDocument, embeddedAssets: Recor
   <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.184.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.184.0/examples/jsm/"}}</script>
 </head>
 <body>
-  <div class="badge"><b>THREEJS</b> GAME STUDIO · ${project.sceneName.replaceAll('<', '&lt;')}</div>
+  <div class="badge"><b>THREEJS</b> STUDIO · ${project.sceneName.replaceAll('<', '&lt;')}</div>
   <div class="hint">Drag to orbit · Scroll to zoom · Configured input actions move</div>
   <script type="module">
     import * as THREE from 'three';
@@ -1078,7 +1078,9 @@ export function buildRuntimeHtml(project: ProjectDocument, embeddedAssets: Recor
       const isShortcutChord=event=>(event.metaKey&&event.code!=='MetaLeft'&&event.code!=='MetaRight')||(event.ctrlKey&&event.code!=='ControlLeft'&&event.code!=='ControlRight')||(event.altKey&&event.code!=='AltLeft'&&event.code!=='AltRight');
       addEventListener('keydown',event=>{if(isShortcutChord(event))return;if(inputCodes.has(event.code)){pressedCodes.add(event.code);event.preventDefault()}});
       addEventListener('keyup',event=>pressedCodes.delete(event.code));addEventListener('blur',clearInput);document.addEventListener('visibilitychange',()=>{if(document.hidden)clearInput()});
-      globalThis.__THREE_GAME_RUNTIME_DIAGNOSTICS__={schemaVersion:project.schemaVersion,getNodePosition:id=>objects.get(id)?.position.toArray()??null,getPressedCodes:()=>[...pressedCodes],resolveAction:actionId=>resolveAction(actionId)};
+      const runtimeDiagnostics={schemaVersion:project.schemaVersion,getNodePosition:id=>objects.get(id)?.position.toArray()??null,getPressedCodes:()=>[...pressedCodes],resolveAction:actionId=>resolveAction(actionId)};
+      globalThis.__THREEJS_STUDIO_RUNTIME_DIAGNOSTICS__=runtimeDiagnostics;
+      globalThis.__THREE_GAME_RUNTIME_DIAGNOSTICS__=runtimeDiagnostics;
       function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const node=root.userData.node;const move=root.userData.move;for(const component of node.components){if(!component.enabled||component.type!=='keyboardMove')continue;const[horizontal,vertical]=resolveAction(component.actionId);move[0]+=horizontal*component.speed*dt;if(component.plane==='xy')move[1]+=vertical*component.speed*dt;else move[2]-=vertical*component.speed*dt}root.position.fromArray(node.transform.position);root.position.x+=move[0];root.position.y+=move[1];root.position.z+=move[2];root.rotation.fromArray([...node.transform.rotation,'XYZ']);root.scale.fromArray(node.transform.scale);for(const component of node.components){if(!component.enabled)continue;if(component.type==='rotate')root.rotation[component.axis]+=t*component.speed;else if(component.type==='float')root.position[component.axis]+=Math.sin(t*component.speed*2+component.phase)*component.distance}}controls.update();renderer.render(scene,camera)}
       addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});frame();
     }

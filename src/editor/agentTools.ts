@@ -119,8 +119,13 @@ export interface AgentCapabilityDomain {
 }
 
 export interface AgentCapabilityManifest {
-  protocol: 'threejs-game-studio.authoring';
+  protocol: 'threejs-studio.authoring';
+  compatibleProtocols: readonly ['threejs-game-studio.authoring'];
   protocolVersion: 1;
+  product: {
+    name: 'ThreeJS Studio';
+    url: 'https://threejs.studio';
+  };
   projectSchemaVersion: ProjectDocument['schemaVersion'];
   guarantees: readonly string[];
   domains: readonly AgentCapabilityDomain[];
@@ -845,8 +850,13 @@ export const AGENT_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = Object.fre
 );
 
 export const AGENT_CAPABILITY_MANIFEST: AgentCapabilityManifest = Object.freeze<AgentCapabilityManifest>({
-  protocol: 'threejs-game-studio.authoring',
+  protocol: 'threejs-studio.authoring',
+  compatibleProtocols: ['threejs-game-studio.authoring'],
   protocolVersion: 1,
+  product: {
+    name: 'ThreeJS Studio',
+    url: 'https://threejs.studio',
+  },
   projectSchemaVersion: 4,
   guarantees: [
     'Every tool call validates its arguments and project result.',

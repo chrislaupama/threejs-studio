@@ -34,9 +34,11 @@ const triangleAsset: ModelAssetRecord = {
 
 test('agent capability manifest is stable, namespaced, and adapter-ready', () => {
   expect(AGENT_CAPABILITY_MANIFEST).toMatchObject({
-    protocol: 'threejs-game-studio.authoring',
+    protocol: 'threejs-studio.authoring',
+    compatibleProtocols: ['threejs-game-studio.authoring'],
     protocolVersion: 1,
     projectSchemaVersion: 4,
+    product: { name: 'ThreeJS Studio', url: 'https://threejs.studio' },
   });
   expect(AGENT_CAPABILITY_MANIFEST.domains.map((domain) => domain.id)).toEqual(
     expect.arrayContaining([

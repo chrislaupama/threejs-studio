@@ -842,7 +842,7 @@ export class ViewportEngine {
         geometries: this.renderer.info.memory.geometries,
         textures: this.renderer.info.memory.textures,
       });
-      window.__THREE_GAME_DIAGNOSTICS__ = {
+      const diagnostics: ThreeJSStudioDiagnostics = {
         frame: this.totalFrames,
         elapsed: this.runtimeTime,
         renderer: {
@@ -890,6 +890,8 @@ export class ViewportEngine {
           }])),
         },
       };
+      window.__THREEJS_STUDIO_DIAGNOSTICS__ = diagnostics;
+      window.__THREE_GAME_DIAGNOSTICS__ = diagnostics;
       this.frames = 0;
       this.statsElapsed = 0;
       this.frameElapsed = 0;
@@ -915,6 +917,7 @@ export class ViewportEngine {
     this.grid.geometry.dispose();
     disposeMaterial(this.grid.material);
     this.renderer.dispose();
+    delete window.__THREEJS_STUDIO_DIAGNOSTICS__;
     delete window.__THREE_GAME_DIAGNOSTICS__;
   }
 }

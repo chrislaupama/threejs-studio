@@ -1,10 +1,12 @@
 import type { StoredModelSource } from './modelAssets';
 import type { ProjectDocument } from './types';
 
-export const ASSET_DB_NAME = 'threejs-game-studio-assets';
+export const ASSET_DB_NAME = 'threejs-studio-assets';
+export const LEGACY_ASSET_DB_NAME = 'threejs-game-studio-assets';
 export const ASSET_STORE_NAME = 'modelSources';
 const ASSET_DB_VERSION = 1;
-const PORTABLE_PROJECT_FORMAT = 'threejs-game-studio-project';
+export const PORTABLE_PROJECT_FORMAT = 'threejs-studio-project';
+export const LEGACY_PORTABLE_PROJECT_FORMAT = 'threejs-game-studio-project';
 
 interface StoredModelSourceRecord extends StoredModelSource {
   key: string;
@@ -29,15 +31,16 @@ export interface PortableProjectBundle {
   assetSources: PortableAssetSource[];
 }
 
-let databasePromise: Promise<IDBDatabase> | null = null;
+const databasePromises = new Map<string, Promise<IDBDatabase>>();
 
 export const assetSourceKey = (projectId: string, assetId: string, revision: number) =>
   `${projectId}::${assetId}::${revision}`;
 
-function openAssetDatabase(): Promise<IDBDatabase> {
-  if (databasePromise) return databasePromise;
-  databasePromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(ASSET_DB_NAME, ASSET_DB_VERSION);
+function openAssetDatabase(databaseName = ASSET_DB_NAME): Promise<IDBDatabase> {
+  const existing = databasePromises.get(databaseName);
+  if (existing) return existing;
+  const databasePromise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(databaseName, ASSET_DB_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
       if (!database.objectStoreNames.contains(ASSET_STORE_NAME)) {
@@ -46,22 +49,23 @@ function openAssetDatabase(): Promise<IDBDatabase> {
       }
     };
     request.onerror = () => {
-      databasePromise = null;
+      databasePromises.delete(databaseName);
       reject(request.error ?? new Error('Could not open the local model store.'));
     };
     request.onsuccess = () => {
       const database = request.result;
       database.onversionchange = () => {
         database.close();
-        databasePromise = null;
+        databasePromises.delete(databaseName);
       };
       resolve(database);
     };
     request.onblocked = () => {
-      databasePromise = null;
+      databasePromises.delete(databaseName);
       reject(new Error('The local model store is blocked by another open studio tab.'));
     };
   });
+  databasePromises.set(databaseName, databasePromise);
   return databasePromise;
 }
 
@@ -100,15 +104,34 @@ export async function getModelAssetSource(
   assetId: string,
   revision: number,
 ): Promise<StoredModelSource | null> {
-  const database = await openAssetDatabase();
-  const transaction = database.transaction(ASSET_STORE_NAME, 'readonly');
-  const completion = waitForTransaction(transaction);
-  const request = transaction.objectStore(ASSET_STORE_NAME).get(assetSourceKey(projectId, assetId, revision));
-  const record = await new Promise<StoredModelSourceRecord | undefined>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result as StoredModelSourceRecord | undefined);
-    request.onerror = () => reject(request.error ?? new Error('Could not read the local model file.'));
-  });
-  await completion;
+  const key = assetSourceKey(projectId, assetId, revision);
+  const readRecord = async (databaseName: string) => {
+    const database = await openAssetDatabase(databaseName);
+    const transaction = database.transaction(ASSET_STORE_NAME, 'readonly');
+    const completion = waitForTransaction(transaction);
+    const request = transaction.objectStore(ASSET_STORE_NAME).get(key);
+    const record = await new Promise<StoredModelSourceRecord | undefined>((resolve, reject) => {
+      request.onsuccess = () => resolve(request.result as StoredModelSourceRecord | undefined);
+      request.onerror = () => reject(request.error ?? new Error('Could not read the local model file.'));
+    });
+    await completion;
+    return record;
+  };
+  const canonicalRecord = await readRecord(ASSET_DB_NAME);
+  const record = canonicalRecord ?? await readRecord(LEGACY_ASSET_DB_NAME);
+  if (record && !canonicalRecord) {
+    try {
+      await putModelAssetSource(projectId, assetId, revision, record);
+      const legacyDatabase = await openAssetDatabase(LEGACY_ASSET_DB_NAME);
+      const legacyTransaction = legacyDatabase.transaction(ASSET_STORE_NAME, 'readwrite');
+      legacyTransaction.objectStore(ASSET_STORE_NAME).delete(key);
+      await waitForTransaction(legacyTransaction);
+    } catch (error) {
+      // A readable legacy source remains usable even when quota or browser
+      // policy prevents the best-effort copy into the canonical database.
+      console.warn('Could not migrate a legacy ThreeJS Studio model source yet.', error);
+    }
+  }
   return record
     ? {
         fileName: record.fileName,
@@ -124,10 +147,13 @@ export async function deleteModelAssetSource(
   assetId: string,
   revision: number,
 ): Promise<void> {
-  const database = await openAssetDatabase();
-  const transaction = database.transaction(ASSET_STORE_NAME, 'readwrite');
-  transaction.objectStore(ASSET_STORE_NAME).delete(assetSourceKey(projectId, assetId, revision));
-  await waitForTransaction(transaction);
+  const key = assetSourceKey(projectId, assetId, revision);
+  await Promise.all([ASSET_DB_NAME, LEGACY_ASSET_DB_NAME].map(async (databaseName) => {
+    const database = await openAssetDatabase(databaseName);
+    const transaction = database.transaction(ASSET_STORE_NAME, 'readwrite');
+    transaction.objectStore(ASSET_STORE_NAME).delete(key);
+    await waitForTransaction(transaction);
+  }));
 }
 
 function bytesToBase64(bytes: ArrayBuffer): string {
@@ -192,7 +218,11 @@ export function readPortableProjectBundle(value: unknown): {
   project: unknown;
   sources: Array<{ assetId: string; revision: number; source: StoredModelSource }>;
 } | null {
-  if (!isRecord(value) || value.format !== PORTABLE_PROJECT_FORMAT || value.bundleVersion !== 1) return null;
+  if (
+    !isRecord(value) ||
+    (value.format !== PORTABLE_PROJECT_FORMAT && value.format !== LEGACY_PORTABLE_PROJECT_FORMAT) ||
+    value.bundleVersion !== 1
+  ) return null;
   if (!Array.isArray(value.assetSources)) throw new Error('Project package assetSources must be an array.');
   const sources = value.assetSources.map((entry, index) => {
     if (!isRecord(entry)) throw new Error(`Project package assetSources[${index}] must be an object.`);

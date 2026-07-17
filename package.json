@@ -1,7 +1,13 @@
 {
-  "name": "threejs-game-studio",
+  "name": "threejs-studio",
   "version": "0.1.0",
   "private": true,
+  "description": "ThreeJS Studio — a browser-based Unity/Unreal-style editor for building Three.js games.",
+  "homepage": "https://threejs.studio",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chrislaupama/threejs-studio.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
