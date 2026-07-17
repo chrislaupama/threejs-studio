@@ -7,8 +7,10 @@ import {
   getAgentToolDefinition,
   validateAgentToolArguments,
 } from '../src/editor/agentTools';
+import { executeAgentToolBatch, planGuidedAgentPrompt } from '../src/editor/agentRuntime';
+import { DEFAULT_MOVE_ACTION_ID } from '../src/editor/inputActions';
 import { createStarterProject, loadProjectDocument } from '../src/editor/project';
-import type { GameplayComponent, ModelAssetRecord, SceneNode } from '../src/editor/types';
+import type { GameplayComponent, InputAction, ModelAssetRecord, SceneNode } from '../src/editor/types';
 
 const triangleAsset: ModelAssetRecord = {
   id: 'asset-triangle',
@@ -30,17 +32,18 @@ const triangleAsset: ModelAssetRecord = {
   },
 };
 
-test('agent capability manifest is stable, namespaced, and MCP-ready', () => {
+test('agent capability manifest is stable, namespaced, and adapter-ready', () => {
   expect(AGENT_CAPABILITY_MANIFEST).toMatchObject({
     protocol: 'threejs-game-studio.authoring',
     protocolVersion: 1,
-    projectSchemaVersion: 3,
+    projectSchemaVersion: 4,
   });
   expect(AGENT_CAPABILITY_MANIFEST.domains.map((domain) => domain.id)).toEqual(
     expect.arrayContaining([
       'scene',
       'materials',
       'gameplay',
+      'input',
       'world',
       'model-assets',
       'lights-cameras',
@@ -53,7 +56,7 @@ test('agent capability manifest is stable, namespaced, and MCP-ready', () => {
       'project-io',
     ]),
   );
-  expect(AGENT_TOOL_DEFINITIONS).toHaveLength(29);
+  expect(AGENT_TOOL_DEFINITIONS).toHaveLength(32);
   expect(new Set(AGENT_TOOL_DEFINITIONS.map((tool) => tool.name)).size).toBe(AGENT_TOOL_DEFINITIONS.length);
   for (const tool of AGENT_TOOL_DEFINITIONS) {
     expect(tool.name).toMatch(/^studio_/);
@@ -77,6 +80,7 @@ test('agent capability manifest is stable, namespaced, and MCP-ready', () => {
   });
   const editorTools = AGENT_TOOL_DEFINITIONS.filter((tool) => tool.host === 'editor');
   expect(editorTools).toHaveLength(14);
+  expect(AGENT_TOOL_DEFINITIONS.filter((tool) => tool.host === 'project')).toHaveLength(18);
   expect(editorTools.map((tool) => tool.name)).toEqual([
     'studio_get_editor_context',
     'studio_get_diagnostics',
@@ -98,6 +102,18 @@ test('agent capability manifest is stable, namespaced, and MCP-ready', () => {
     category: 'project-io',
     risk: { level: 'destructive', approval: 'required', reversible: false },
   });
+  expect(getAgentToolDefinition('studio_upsert_input_action')).toMatchObject({
+    host: 'project',
+    category: 'input',
+    scopes: ['input.read', 'input.write', 'gameplay.read'],
+    risk: { reversible: true },
+  });
+  expect(getAgentToolDefinition('studio_delete_input_action')).toMatchObject({
+    host: 'project',
+    category: 'input',
+    scopes: ['input.read', 'input.delete', 'gameplay.read'],
+    risk: { approval: 'required' },
+  });
 });
 
 test('registered schemas validate editor-host requests before live bridge execution', () => {
@@ -118,6 +134,14 @@ test('registered schemas validate editor-host requests before live bridge execut
   expect(validateAgentToolArguments('studio_get_diagnostics', { sections: ['assets', 'assets'] })).toContain(
     'arguments.sections must not contain duplicate items.',
   );
+  expect(validateAgentToolArguments('studio_upsert_input_action', {
+    name: 'Modifier Move',
+    bindings: [{ code: 'ControlLeft', axis: 'y', scale: 1 }],
+  })).toEqual([]);
+  expect(validateAgentToolArguments('studio_upsert_input_action', {
+    name: 'Imaginary Move',
+    bindings: [{ code: 'BrowserBanana', axis: 'y', scale: 1 }],
+  })).toContain('arguments.bindings[0].code does not match the required format.');
   expect(validateAgentToolArguments('studio_get_diagnostics', { sections: ['network'] })).toContain(
     'arguments.sections[0] must be one of: editor, renderer, assets, history.',
   );
@@ -146,12 +170,12 @@ test('inspection tools summarize, list, get, and search without mutating their i
   const before = JSON.stringify(project);
 
   const summary = executeAgentTool<{
-    totals: { nodes: number; assets: number; components: number };
+    totals: { nodes: number; assets: number; components: number; inputActions: number };
     byKind: Record<string, number>;
   }>(project, 'studio_get_project_summary');
   expect(summary.ok).toBe(true);
   expect(summary.changed).toBe(false);
-  expect(summary.data?.totals).toEqual({ nodes: project.nodes.length, assets: 0, components: 3 });
+  expect(summary.data?.totals).toEqual({ nodes: project.nodes.length, assets: 0, components: 3, inputActions: 1 });
   expect(summary.data?.byKind.mesh).toBeGreaterThan(0);
 
   const listed = executeAgentTool<{ nodes: Array<{ id: string }>; total: number }>(project, 'studio_list_nodes', {
@@ -315,6 +339,144 @@ test('gameplay, world, and existing-model tools cover non-visual authoring domai
   expect(withAsset.nodes.some((node) => node.kind === 'model')).toBe(false);
 });
 
+test('named Input Action tools are immutable, reference-safe, atomic, and guided', () => {
+  const project = createStarterProject();
+  const before = JSON.stringify(project);
+  const originalMove = project.inputActions.find((action) => action.id === DEFAULT_MOVE_ACTION_ID);
+  expect(originalMove).toBeTruthy();
+
+  const listed = executeAgentTool<{
+    actions: Array<InputAction & { references: Array<{ nodeId: string; componentId: string }> }>;
+    total: number;
+  }>(project, 'studio_list_input_actions', {});
+  expect(listed).toMatchObject({ ok: true, changed: false, data: { total: 1 } });
+  expect(listed.data?.actions[0]).toMatchObject({
+    id: DEFAULT_MOVE_ACTION_ID,
+    name: 'Move',
+    type: 'axis2d',
+    references: [{ nodeId: 'player-rig', componentId: 'player-move' }],
+  });
+
+  const ijklBindings = [
+    { code: 'KeyJ', axis: 'x', scale: -1 },
+    { code: 'KeyL', axis: 'x', scale: 1 },
+    { code: 'KeyI', axis: 'y', scale: 1 },
+    { code: 'KeyK', axis: 'y', scale: -1 },
+  ];
+  const remapped = executeAgentTool<{ action: InputAction }>(project, 'studio_upsert_input_action', {
+    actionId: DEFAULT_MOVE_ACTION_ID,
+    bindings: ijklBindings,
+  });
+  expect(remapped).toMatchObject({ ok: true, changed: true });
+  expect(remapped.data?.action.bindings.map((binding) => binding.code)).toEqual(['KeyJ', 'KeyL', 'KeyI', 'KeyK']);
+  expect(remapped.data?.action.bindings.map((binding) => binding.id)).toEqual(originalMove?.bindings.slice(0, 4).map((binding) => binding.id));
+  expect(JSON.stringify(project)).toBe(before);
+
+  const reordered = executeAgentTool<{ action: InputAction }>(project, 'studio_upsert_input_action', {
+    actionId: DEFAULT_MOVE_ACTION_ID,
+    bindings: [...project.inputActions[0]!.bindings].reverse().map(({ code, axis, scale }) => ({ code, axis, scale })),
+  });
+  expect(reordered.ok).toBe(true);
+  expect(reordered.data?.action.bindings.map((binding) => [binding.code, binding.id])).toEqual(
+    [...project.inputActions[0]!.bindings].reverse().map((binding) => [binding.code, binding.id]),
+  );
+
+  const broadCodes = [
+    ...[...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].map((letter) => `Key${letter}`),
+    ...[...'0123456789'].map((digit) => `Digit${digit}`),
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  ];
+  const broadBindings = broadCodes.map((code, index) => ({
+    code,
+    axis: index % 2 === 0 ? 'x' as const : 'y' as const,
+    scale: index % 4 < 2 ? -1 as const : 1 as const,
+  }));
+  const broadAction = executeAgentTool<{ action: InputAction }>(project, 'studio_upsert_input_action', {
+    name: 'Broad Controls',
+    bindings: broadBindings,
+  });
+  expect(broadAction).toMatchObject({ ok: true, changed: true });
+  expect(broadAction.data?.action.bindings).toHaveLength(40);
+
+  const created = executeAgentTool<{ action: InputAction }>(remapped.nextProject, 'studio_upsert_input_action', {
+    name: 'Alternate Move',
+    bindings: ijklBindings,
+  });
+  expect(created.ok).toBe(true);
+  const alternateId = created.data?.action.id;
+  expect(alternateId).toBeTruthy();
+  if (!alternateId) throw new Error('Expected an Input Action id.');
+
+  const reassigned = executeAgentTool<{ component: GameplayComponent }>(created.nextProject, 'studio_update_component', {
+    nodeId: 'player-rig',
+    componentId: 'player-move',
+    changes: { actionId: alternateId },
+  });
+  expect(reassigned.data?.component).toMatchObject({ type: 'keyboardMove', actionId: alternateId });
+  const guidedReassigned = planGuidedAgentPrompt(reassigned.nextProject, 'player-rig', 'Set Move controls to IJKL');
+  expect(guidedReassigned.calls[0]).toMatchObject({
+    name: 'studio_upsert_input_action',
+    arguments: { actionId: alternateId },
+  });
+  const withoutDefault = executeAgentTool(reassigned.nextProject, 'studio_delete_input_action', { actionId: DEFAULT_MOVE_ACTION_ID });
+  expect(withoutDefault.ok).toBe(true);
+  const fallbackComponent = executeAgentTool<{ component: GameplayComponent }>(withoutDefault.nextProject, 'studio_add_component', {
+    nodeId: 'platform',
+    type: 'keyboardMove',
+  });
+  expect(fallbackComponent.data?.component).toMatchObject({ type: 'keyboardMove', actionId: alternateId });
+  const referencedDelete = executeAgentTool(reassigned.nextProject, 'studio_delete_input_action', { actionId: alternateId });
+  expect(referencedDelete).toMatchObject({ ok: false, changed: false });
+  expect(referencedDelete.errors).toContain('Alternate Move is referenced by Player Rig. Reassign those Keyboard Move components before deleting it.');
+  expect(referencedDelete.nextProject).toEqual(reassigned.nextProject);
+
+  const missingReference = executeAgentTool(reassigned.nextProject, 'studio_update_component', {
+    nodeId: 'player-rig',
+    componentId: 'player-move',
+    changes: { actionId: 'missing.action' },
+  });
+  expect(missingReference.errors).toContain('Input Action "missing.action" does not exist.');
+
+  const restoredReference = executeAgentTool(reassigned.nextProject, 'studio_update_component', {
+    nodeId: 'player-rig',
+    componentId: 'player-move',
+    changes: { actionId: DEFAULT_MOVE_ACTION_ID },
+  });
+  const deleted = executeAgentTool(restoredReference.nextProject, 'studio_delete_input_action', { actionId: alternateId });
+  expect(deleted.ok).toBe(true);
+  expect(deleted.nextProject.inputActions.some((action) => action.id === alternateId)).toBe(false);
+
+  const malformed = executeAgentTool(project, 'studio_upsert_input_action', {
+    actionId: DEFAULT_MOVE_ACTION_ID,
+    bindings: [{ code: 'KeyQ', axis: 'x', scale: 0 }],
+  });
+  expect(malformed).toMatchObject({ ok: false, changed: false });
+  expect(malformed.errors).toContain('arguments.bindings[0].scale must be -1 or 1.');
+
+  const atomic = executeAgentToolBatch(project, [
+    { name: 'studio_upsert_input_action', arguments: { actionId: DEFAULT_MOVE_ACTION_ID, bindings: ijklBindings } },
+    { name: 'studio_delete_input_action', arguments: { actionId: DEFAULT_MOVE_ACTION_ID } },
+  ]);
+  expect(atomic).toMatchObject({ ok: false, changed: false });
+  expect(atomic.nextProject).toEqual(project);
+
+  const guided = planGuidedAgentPrompt(project, 'player-core', 'Set Move controls to IJKL');
+  expect(guided).toMatchObject({
+    ok: true,
+    kind: 'proposal',
+    calls: [{ name: 'studio_upsert_input_action', arguments: { actionId: DEFAULT_MOVE_ACTION_ID } }],
+  });
+  const guidedApply = executeAgentToolBatch(project, guided.calls);
+  expect(guidedApply.ok).toBe(true);
+  expect(guidedApply.nextProject.inputActions[0].bindings.map((binding) => binding.code)).toEqual(['KeyJ', 'KeyL', 'KeyI', 'KeyK']);
+  const reset = planGuidedAgentPrompt(guidedApply.nextProject, 'player-core', 'Reset Move controls');
+  const resetApply = executeAgentToolBatch(guidedApply.nextProject, reset.calls);
+  expect(resetApply.ok).toBe(true);
+  expect(resetApply.nextProject.inputActions[0].bindings.map((binding) => binding.code)).toEqual([
+    'KeyA', 'KeyD', 'KeyW', 'KeyS', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  ]);
+});
+
 test('invalid calls are atomic and contextual risk metadata identifies approval boundaries', () => {
   const project = createStarterProject();
   const before = JSON.stringify(project);
@@ -372,6 +534,25 @@ test('invalid calls are atomic and contextual risk metadata identifies approval 
   expect(assessAgentToolCall(project, 'studio_delete_node', { nodeId: 'player-rig' })).toMatchObject({
     requiresApproval: true,
     level: 'destructive',
+  });
+  expect(assessAgentToolCall(project, 'studio_upsert_input_action', {
+    actionId: DEFAULT_MOVE_ACTION_ID,
+    bindings: [],
+  })).toMatchObject({
+    requiresApproval: true,
+    approval: 'required',
+    level: 'moderate',
+    reasons: [expect.stringContaining('removes every binding')],
+  });
+  expect(assessAgentToolCall(project, 'studio_update_component', {
+    nodeId: 'player-rig',
+    componentId: 'player-move',
+    changes: { actionId: 'alternate.move' },
+  })).toMatchObject({
+    requiresApproval: true,
+    approval: 'required',
+    level: 'moderate',
+    reasons: [expect.stringContaining('reassigns Player Rig controls')],
   });
   expect(JSON.stringify(project)).toBe(before);
 });

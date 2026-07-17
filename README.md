@@ -11,7 +11,8 @@ This repository contains a complete editor vertical slice with progressive discl
 - Hierarchy and viewport selection synchronized with the Inspector.
 - Create box, sphere, capsule, cylinder, cone, plane, torus, and empty-group entities.
 - Edit names, visibility, locks, position, rotation, scale, PBR material values, lights, cameras, fog, exposure, grid, and shadows.
-- Stack multiple gameplay components on an object: Spin, Float, and Move with Keyboard (WASD/arrow keys), each with novice-safe defaults and advanced controls.
+- Stack multiple gameplay components on an object: Spin, Float, and Move with Keyboard, each with novice-safe defaults and advanced controls. Movement reads a project-level named Input Action instead of hard-coded keys.
+- Author keyboard Input Actions visually: Essentials can restore the familiar movement preset, while Advanced creators can add, rename, assign, and rebind normalized two-axis actions. Movement components link directly to the action editor; duplicate keys are prevented contextually and standard modifier keys remain playable without capturing modified browser shortcuts.
 - Inspect and manipulate authored project data through a versioned AI capability registry with typed inputs, stable IDs, immutable results, validation, declared scope metadata, risk metadata, and contextual approval rules.
 - Use the local Guided Assistant to inspect the project or prepare scene, material, behavior, visibility, hierarchy, and world changes for review. Accepted pure project-tool proposals commit atomically as one undoable editor action.
 - Connect trusted same-page integrations through a revision-checked in-page bridge that exposes cloned project/editor context and typed tools without exposing React, DOM, or Three.js objects.
@@ -20,8 +21,8 @@ This repository contains a complete editor vertical slice with progressive discl
 - Imported model files persist in revisioned IndexedDB storage, can be instantiated repeatedly through a shared parsed-model cache, retain their glTF materials, and show visible loading/missing/error placeholders with relink recovery.
 - Undo/redo, duplicate, delete, keyboard shortcuts, command palette, and an editor console.
 - Play, pause, deterministic single-step, stop, Game Camera view, and clean fullscreen preview. Play mode is mutation-locked and Stop restores authored transforms.
-- Browser autosave plus portable editable project packages. Schema-v1 and schema-v2 projects migrate to validated schema v3 with stable component/asset IDs and path-specific import errors.
-- One-click single-HTML web build using the same serialized scene document as the editor preview; referenced model bytes are embedded in the download.
+- Browser autosave plus portable editable project packages. Schema-v1, schema-v2, and schema-v3 projects migrate sequentially to validated schema v4 with stable component, asset, action, and binding IDs plus path-specific import errors.
+- One-click single-HTML web build using the same serialized scene document as the editor preview; referenced model bytes are embedded in the download and a read-only runtime diagnostics seam supports QA/agent inspection.
 - Responsive authoring layout with compact drawers and review controls on narrow screens.
 - Desktop and mobile Playwright coverage with WebGL pixel sampling and visual baselines.
 
@@ -85,6 +86,7 @@ Important files:
 - `src/App.tsx` — editor orchestration, history, persistence, menus, shortcuts, play state.
 - `src/editor/types.ts` — serializable project and component contracts.
 - `src/editor/project.ts` — starter project, document operations, asset library, import/export, runtime HTML builder.
+- `src/editor/inputActions.ts` — named-action defaults, pure authoring operations, references, and normalized keyboard resolution.
 - `src/editor/modelAssets.ts` — self-contained glTF parsing, import diagnostics, validation, and GPU-resource disposal.
 - `src/editor/assetStore.ts` — revisioned IndexedDB model sources and portable project package encoding.
 - `src/editor/agentTools.ts` — versioned capability manifest, typed project tools, validation, scopes, and risk/approval metadata.
@@ -95,10 +97,11 @@ Important files:
 - `tests/model.spec.ts` — schema migration, validation, and component-preset coverage.
 - `tests/agent-tools.spec.ts` — AI capability, immutability, validation, domain, and approval-boundary contract coverage.
 - `tests/assistant-integration.spec.ts` — pure project-proposal atomicity, single-step Undo, responsive entry points, and browser-bridge contract coverage.
+- `tests/standalone-runtime.spec.ts` — boots the generated HTML with locally routed Three.js modules and drives authored input/cleanup behavior.
 - `tests/visual.spec.ts` — Essentials journey, composable runtime, isolation, persistence, and nonblank WebGL coverage.
 - `tests/visual-regression.spec.ts` — Essentials, Advanced, Studio Assistant, and imported-model desktop/mobile visual baselines.
 
-Live `Object3D`, DOM, texture, and object-URL references never enter the project document. Schema v3 stores only asset metadata and stable references; model bytes live in IndexedDB or a portable export envelope. That boundary keeps save files stable and ensures the editor, preview, and exported runtime consume the same scene format.
+Live `Object3D`, DOM, texture, input-device state, and object-URL references never enter the project document. Schema v4 stores only asset metadata, named input definitions, and stable references; model bytes live in IndexedDB or a portable export envelope. That boundary keeps save files stable and ensures the editor, preview, and exported runtime consume the same scene format.
 
 ## AI authoring status
 
@@ -116,6 +119,6 @@ See [docs/PRODUCT_PLAN.md](docs/PRODUCT_PLAN.md) for the staged path from this f
 
 ## Current scope boundaries
 
-The studio does not yet execute arbitrary user scripts, expose an external MCP server, connect to a model-backed provider, import standalone texture/audio/environment assets, run physics, edit or play imported animation clips, create nested prefabs, decode Draco/Meshopt/KTX2 models, resolve multi-file glTF packages, or emit an offline static ZIP. The current importer intentionally accepts self-contained GLB and glTF files with data-URI resources, then gives actionable guidance for unsupported packages. Keyboard Move is a shipped data-driven component, not a substitute for the planned Input Actions system.
+The studio does not yet execute arbitrary user scripts, expose an external MCP server, connect to a model-backed provider, import standalone texture/audio/environment assets, run physics, edit or play imported animation clips, create nested prefabs, decode Draco/Meshopt/KTX2 models, resolve multi-file glTF packages, or emit an offline static ZIP. The current importer intentionally accepts self-contained GLB and glTF files with data-URI resources, then gives actionable guidance for unsupported packages. Input Actions are keyboard-first and two-axis in this slice; buttons, contexts, pointer, touch, gamepad, and runtime rebinding remain planned extensions of the same serializable boundary.
 
 No external art assets are checked into this repository and no API keys are required. The starter scene and UI are generated entirely from code and Three.js geometry; local models enter only through the user-controlled import flow.

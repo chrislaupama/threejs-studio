@@ -45,6 +45,25 @@ test('Advanced editor visual baseline', async ({ page }, testInfo) => {
   });
 });
 
+test('Advanced Input Actions visual baseline', async ({ page }, testInfo) => {
+  await prepare(page);
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
+  if (testInfo.project.name.includes('mobile')) {
+    await page.getByRole('button', { name: 'Toggle objects' }).click();
+    await page.locator('[data-node-id="scene-root"]').click();
+    await page.getByRole('button', { name: 'Toggle details' }).click();
+  } else {
+    await page.locator('[data-node-id="scene-root"]').click();
+  }
+  await expect(page.getByTestId('input-actions-editor')).toBeVisible();
+  await page.addStyleTag({ content: '.toast, .viewport-stats, .autosave-state { visibility: hidden !important; }' });
+  await page.waitForTimeout(120);
+  await expect(page).toHaveScreenshot(`studio-input-actions-${testInfo.project.name}.png`, {
+    fullPage: true,
+    maxDiffPixelRatio: 0.012,
+  });
+});
+
 test('Studio Assistant proposal visual baseline', async ({ page }, testInfo) => {
   await prepare(page);
   const desktopToggle = page.getByTestId('assistant-toggle');

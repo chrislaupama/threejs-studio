@@ -22,7 +22,7 @@ The core promise is:
 ## Milestone 1 — Editor foundation (implemented)
 
 - React + TypeScript editor shell around a direct Three.js viewport.
-- Versioned, validated schema-v3 project format with sequential schema-v1 behavior → schema-v2 component → schema-v3 asset-catalog migration.
+- Versioned, validated schema-v4 project format with sequential schema-v1 behavior → schema-v2 component → schema-v3 asset-catalog → schema-v4 Input Actions migration.
 - Starter scene with meshes, lights, camera, materials, world settings, and stackable gameplay components.
 - Essentials and Advanced authoring experiences over one shared project, with a persisted real-action Quick Start journey.
 - Hierarchy, picking, transform gizmos, inspector, built-in assets, and scene/game tabs.
@@ -36,7 +36,7 @@ Success metric: a new user can follow Add → Style → Play → Build without k
 
 ## Milestone 2 — Asset and prefab pipeline (model slice implemented)
 
-- Revisioned IndexedDB model storage with binary records separated from schema-v3 project metadata. **Implemented.**
+- Revisioned IndexedDB model storage with binary records separated from schema-v4 project metadata. **Implemented.**
 - Self-contained GLB/embedded-resource glTF import with fit/original sizing, bounds, animation-name, triangle, material, texture, and file-size diagnostics. **Implemented.**
 - Shared parsed-model cache, SkeletonUtils instances, reference counting, stale-load guards, explicit GPU disposal, and visible loading/missing/error recovery. **Implemented.**
 - Novice Create/import/reuse/relink flow plus Advanced Models catalog and technical diagnostics. **Implemented.**
@@ -57,21 +57,22 @@ Verified slice limits: imports are capped at 100 MiB and must be self-contained;
 - Versioned `threejs-game-studio.authoring` capability manifest with JSON-compatible input schemas, stable namespaced tools, declared scope metadata, read/write effects, risk levels, reversibility, and approval policies. Scope grants are not authenticated or enforced by the current same-page integration seam. **Implemented.**
 - Pure, immutable project tools for project/scene inspection, hierarchy and transforms, primitive materials, gameplay components, world/rendering settings, lights/cameras, and existing imported-model instances. Every successful result is validated before it can enter editor history. **Implemented.**
 - Local Guided Assistant with bounded plain-language planning and structured tool-call input, exact-value/contextual-risk proposal review, atomic pure project-tool multi-call validation, stale-revision rejection, one-step Undo, concurrent-proposal reservation, and normal autosave/viewport reconciliation. Project and editor-host mutations are reviewed separately, with host actions proposed one at a time. This is deliberately deterministic and not presented as a language model. **Implemented.**
-- Fifteen pure project tools plus fourteen browser-host definitions for editor context/diagnostics, selection, viewport, Play/Preview/Step controls, history, console, layout, save/export/build, and user-mediated file-picker requests, producing a 29-tool combined manifest; plus a versioned trusted same-page integration bridge over cloned data. **Implemented.**
+- Eighteen pure project tools plus fourteen browser-host definitions for project/input inspection and authoring, editor context/diagnostics, selection, viewport, Play/Preview/Step controls, history, console, layout, save/export/build, and user-mediated file-picker requests, producing a 32-tool combined manifest; plus a versioned trusted same-page integration bridge over cloned data. **Implemented.**
 - Contributor parity rule and contract tests requiring new human authoring areas to gain matching typed capabilities and browser/Undo coverage. **Implemented and ongoing.**
 - Local MCP stdio sidecar with loopback pairing, explicit scopes, cancellation, structured conflicts, and audit attribution. **Planned; the current browser bridge is not an MCP server.**
 - Model-backed built-in provider connected through a local model, secure companion, or hosted token broker. **Planned; no model API key or cloud provider is bundled.**
 - Staged, digest-verified out-of-band asset transfer for external agents instead of large base64 tool arguments or unrestricted filesystem paths. **Planned.**
 
-Current AI-slice result: a human can ask the Guided Assistant for supported project changes, inspect the proposed typed calls, apply a pure project-tool plan as one reversible transaction, and continue editing through the normal UI. A trusted same-page integration can discover the same contract and is prevented from applying a plan against a stale authoring revision. Its scope labels are advisory metadata rather than an authorization boundary. External connectivity, authenticated scope enforcement, and model intelligence remain separate deployment phases.
+Current AI-slice result: a human can ask the Guided Assistant for supported project changes, inspect exact nested binding values, apply a pure project-tool plan as one reversible transaction, and continue editing through the normal UI. A trusted same-page integration can discover the same contract, read Input Actions immediately, and route reference-safe remaps, reassignments, deletion, and Undo through visible revision-checked review. Its scope labels are advisory metadata rather than an authorization boundary. External connectivity, authenticated scope enforcement, and model intelligence remain separate deployment phases.
 
 Success metric: adding a new human authoring surface fails the milestone unless its durable data is reachable through the shared capability registry or is explicitly documented as system-managed/read-only. See `docs/AI_ARCHITECTURE.md` for the capability matrix and security boundary.
 
 ## Milestone 3 — Gameplay framework
 
 - Extend the shipped gameplay-component foundation into a registry covering transform, model, camera, light, collider, rigid body, audio source, and custom behavior definitions.
+- Named Input Actions v1: project-level, stable two-axis actions with supported physical keyboard-code bindings (including usable modifiers), novice presets, Advanced authoring with conflict prevention and component-to-action navigation, component references, normalized Play/build resolution, migration, diagnostics, Undo, and matching typed AI capabilities. **Implemented.**
 - Rapier physics integration with fixed timestep, sensors, collision layers, debug shapes, and restart cleanup.
-- Replace the current Keyboard Move preset with an Input Actions editor mapping keyboard, pointer, touch, and gamepad to named intents.
+- Extend Input Actions with buttons, action contexts, conflict guidance, runtime rebinding, pointer, touch, and gamepad bindings.
 - Scene flow, spawn points, tags/layers, events, timers, checkpoints, and save-game data.
 - Data-driven behavior graph for common logic.
 - TypeScript behavior SDK compiled in a Worker; runtime preview hosted in a sandboxed iframe.

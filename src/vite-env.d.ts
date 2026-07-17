@@ -34,6 +34,10 @@ interface ThreeStudioDiagnostics {
   runtime: {
     tick: number;
     fixedDelta: number;
+    input: {
+      pressedCodes: string[];
+      actions: Record<string, [number, number]>;
+    };
     transforms: Record<string, {
       position: number[];
       rotation: number[];

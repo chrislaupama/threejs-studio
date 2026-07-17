@@ -90,6 +90,7 @@ import type {
   ConsoleEntry,
   EditorMode,
   EditorTool,
+  InputAction,
   ModelAssetRecord,
   PrimitiveType,
   ProjectDocument,
@@ -101,8 +102,12 @@ import type {
 } from './editor/types';
 import { ViewportEngine } from './editor/ViewportEngine';
 
-const STORAGE_KEY = 'threejs-game-studio:project:v3';
-const LEGACY_STORAGE_KEYS = ['threejs-game-studio:project:v2', 'threejs-game-studio:project:v1'];
+const STORAGE_KEY = 'threejs-game-studio:project:v4';
+const LEGACY_STORAGE_KEYS = [
+  'threejs-game-studio:project:v3',
+  'threejs-game-studio:project:v2',
+  'threejs-game-studio:project:v1',
+];
 const EXPERIENCE_KEY = 'threejs-game-studio:experience';
 const QUICK_START_KEY = 'threejs-game-studio:quick-start';
 const MAX_HISTORY = 60;
@@ -223,6 +228,42 @@ function modelDisplayName(filename: string) {
   const withoutExtension = filename.replace(/\.(?:glb|gltf)$/i, '');
   const cleaned = withoutExtension.replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return cleaned ? cleaned.replace(/\b\w/g, (character) => character.toUpperCase()) : 'Imported Model';
+}
+
+function inputCodeLabel(code: string) {
+  if (code.startsWith('Key') && code.length === 4) return code.slice(3);
+  if (code.startsWith('Digit') && code.length === 6) return code.slice(5);
+  return ({
+    ArrowUp: '↑',
+    ArrowLeft: '←',
+    ArrowDown: '↓',
+    ArrowRight: '→',
+    Space: 'Space',
+  } as Record<string, string>)[code] ?? code;
+}
+
+function movementControlsHint(project: ProjectDocument) {
+  const components = project.nodes.flatMap((node) => node.components);
+  const movementComponent = components.find((component) => component.id === 'player-move' && component.type === 'keyboardMove')
+    ?? components.find((component) => component.type === 'keyboardMove');
+  const actionId = movementComponent?.type === 'keyboardMove' ? movementComponent.actionId : undefined;
+  const action = project.inputActions.find((candidate) => candidate.id === actionId);
+  if (!action) return 'Use your configured movement controls';
+  const directions: Array<[InputAction['bindings'][number]['axis'], InputAction['bindings'][number]['scale']]> = [
+    ['y', 1],
+    ['x', -1],
+    ['y', -1],
+    ['x', 1],
+  ];
+  const primary = directions.flatMap(([axis, scale]) => {
+    const matches = action.bindings.filter((binding) => binding.axis === axis && binding.scale === scale);
+    const binding = matches.find((candidate) => !candidate.code.startsWith('Arrow')) ?? matches[0];
+    return binding ? [inputCodeLabel(binding.code)] : [];
+  });
+  if (!primary.length) return `Use the ${action.name} controls`;
+  const hasArrowSet = ['ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight']
+    .every((code) => action.bindings.some((binding) => binding.code === code));
+  return `Use ${primary.join(' / ')}${hasArrowSet && !primary.some((label) => ['↑', '←', '↓', '→'].includes(label)) ? ' or arrow keys' : ''}`;
 }
 
 function assistantId(prefix: string) {
@@ -423,6 +464,20 @@ export default function App() {
     next.updatedAt = new Date().toISOString();
     commitProject(next, label);
   }, [commitProject]);
+
+  const updateInputActions = useCallback((inputActions: InputAction[], label: string) => {
+    const next = cloneProject(projectRef.current);
+    next.inputActions = structuredClone(inputActions);
+    next.updatedAt = new Date().toISOString();
+    const validated = loadProjectDocument(next);
+    if (!validated.ok) {
+      const message = validated.errors[0] ?? 'Input Actions could not be updated.';
+      addLog(message, 'warning');
+      showToast(message);
+      return;
+    }
+    commitProject(validated.project, label);
+  }, [addLog, commitProject, showToast]);
 
   const undo = useCallback((actor: EditorActor = 'human') => {
     if (modeRef.current !== 'edit') return;
@@ -1704,7 +1759,7 @@ export default function App() {
                 </section>
               ) : null}
               {mode !== 'edit' && experience === 'advanced' ? <div className="playing-badge"><span /><strong>{mode === 'paused' ? 'PAUSED' : 'PLAYING'}</strong></div> : null}
-              {mode !== 'edit' && experience === 'essentials' ? <div className="essential-runtime-banner" data-testid="runtime-banner"><span className="preview-live-dot" /><strong>Playing</strong><span>Use WASD or arrow keys · Esc to return</span><button type="button" onClick={stopPlay}>Stop</button></div> : null}
+              {mode !== 'edit' && experience === 'essentials' ? <div className="essential-runtime-banner" data-testid="runtime-banner"><span className="preview-live-dot" /><strong>Playing</strong><span>{movementControlsHint(project)} · Esc to return</span><button type="button" onClick={stopPlay}>Stop</button></div> : null}
               {viewMode === 'scene' && experience === 'advanced' ? (
                 <div className="orientation-widget" aria-label="Camera orientation">
                   <button type="button" className="axis-y" aria-label="Top view" onClick={() => engineRef.current?.setCameraView('top')}>Y</button>
@@ -1773,7 +1828,7 @@ export default function App() {
             onDiscardPlan={discardPendingAssistantPlan}
             onUndoLast={undoLastAssistantPlan}
           />
-        ) : inspectorOpen ? <InspectorPanel node={selectedNode} project={project} experience={experience} disabled={editingDisabled} assetStatuses={assetStatuses} onUpdate={updateSceneNode} onUpdateSettings={updateProjectSettings} onRelinkModel={openModelPicker} onDelete={deleteSelected} /> : null}
+        ) : inspectorOpen ? <InspectorPanel node={selectedNode} project={project} experience={experience} disabled={editingDisabled} assetStatuses={assetStatuses} onUpdate={updateSceneNode} onUpdateSettings={updateProjectSettings} onUpdateInputActions={updateInputActions} onManageInputActions={() => setSelectedId('scene-root')} onRelinkModel={openModelPicker} onDelete={deleteSelected} /> : null}
       </div>
 
       <footer className="statusbar">

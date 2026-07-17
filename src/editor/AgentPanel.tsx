@@ -63,7 +63,7 @@ const suggestions = [
   'Summarize my scene',
   'Add a coral sphere',
   'Move the selected object to 0, 2, 0',
-  'Add spin to the selected object',
+  'Set Move controls to IJKL',
   'Set the background to #101827',
 ];
 
@@ -80,7 +80,12 @@ function readableKey(value: string) {
 }
 
 function flattenArguments(value: unknown, prefix = ''): string[] {
-  if (Array.isArray(value)) return [`${prefix}: ${value.map((entry) => typeof entry === 'number' ? Number(entry.toFixed(4)) : String(entry)).join(', ')}`];
+  if (Array.isArray(value)) {
+    if (value.some((entry) => entry !== null && typeof entry === 'object')) {
+      return value.flatMap((entry, index) => flattenArguments(entry, `${prefix} ${index + 1}`.trim()));
+    }
+    return [`${prefix}: ${value.map((entry) => typeof entry === 'number' ? Number(entry.toFixed(4)) : String(entry)).join(', ')}`];
+  }
   if (value && typeof value === 'object') {
     return Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => flattenArguments(entry, prefix ? `${prefix} ${readableKey(key)}` : readableKey(key)));
   }

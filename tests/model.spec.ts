@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { addModelAsset, buildRuntimeHtml, createGameplayComponent, createStarterProject, loadProjectDocument } from '../src/editor/project';
 import type { ModelAssetRecord } from '../src/editor/types';
 
-test('v1 and v2 projects migrate once into stable v3 projects', () => {
+test('v1, v2, and v3 projects migrate once into stable v4 projects', () => {
   const starter = createStarterProject();
   const legacy = structuredClone(starter) as unknown as Record<string, unknown>;
   legacy.schemaVersion = 1;
@@ -21,8 +21,11 @@ test('v1 and v2 projects migrate once into stable v3 projects', () => {
   const first = loadProjectDocument(legacy);
   expect(first.ok).toBeTruthy();
   if (!first.ok) return;
-  expect(first.project.schemaVersion).toBe(3);
+  expect(first.project.schemaVersion).toBe(4);
   expect(first.project.assets).toEqual([]);
+  expect(first.project.inputActions).toEqual([
+    expect.objectContaining({ id: 'player.move', name: 'Move', type: 'axis2d' }),
+  ]);
   expect(first.project.settings.fogEnabled).toBe(true);
   expect(first.project.nodes.find((node) => node.id === 'player-core')?.components).toEqual([
     {
@@ -49,13 +52,31 @@ test('v1 and v2 projects migrate once into stable v3 projects', () => {
   const versionTwoResult = loadProjectDocument(versionTwo);
   expect(versionTwoResult.ok).toBeTruthy();
   if (versionTwoResult.ok) {
-    expect(versionTwoResult.project.schemaVersion).toBe(3);
+    expect(versionTwoResult.project.schemaVersion).toBe(4);
     expect(versionTwoResult.project.assets).toEqual([]);
+    expect(versionTwoResult.project.inputActions[0]?.id).toBe('player.move');
+  }
+
+  const versionThree = structuredClone(starter) as unknown as Record<string, unknown>;
+  versionThree.schemaVersion = 3;
+  delete versionThree.inputActions;
+  const versionThreeNodes = versionThree.nodes as Array<Record<string, unknown>>;
+  const legacyMove = (versionThreeNodes.find((node) => node.id === 'player-rig')?.components as Array<Record<string, unknown>>)[0];
+  delete legacyMove.actionId;
+  const versionThreeResult = loadProjectDocument(versionThree);
+  expect(versionThreeResult.ok).toBeTruthy();
+  if (versionThreeResult.ok) {
+    expect(versionThreeResult.project.schemaVersion).toBe(4);
+    expect(versionThreeResult.project.inputActions[0]?.id).toBe('player.move');
+    expect(versionThreeResult.project.nodes.find((node) => node.id === 'player-rig')?.components[0]).toMatchObject({
+      type: 'keyboardMove',
+      actionId: 'player.move',
+    });
   }
 });
 
 test('project loading rejects future schemas and reports exact nested paths', () => {
-  const future = { ...createStarterProject(), schemaVersion: 4 };
+  const future = { ...createStarterProject(), schemaVersion: 5 };
   const futureResult = loadProjectDocument(future);
   expect(futureResult.ok).toBe(false);
   if (!futureResult.ok) expect(futureResult.errors[0]).toContain('newer than this editor supports');
@@ -126,5 +147,5 @@ test('component presets are safe, unique, and composable', () => {
   expect(new Set([rotate.id, float.id, move.id]).size).toBe(3);
   expect(rotate).toMatchObject({ type: 'rotate', enabled: true, axis: 'y' });
   expect(float).toMatchObject({ type: 'float', enabled: true, axis: 'y', distance: 0.25 });
-  expect(move).toMatchObject({ type: 'keyboardMove', enabled: true, plane: 'xz' });
+  expect(move).toMatchObject({ type: 'keyboardMove', enabled: true, plane: 'xz', actionId: 'player.move' });
 });

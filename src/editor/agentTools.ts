@@ -11,9 +11,20 @@ import {
   removeNode,
   updateNode,
 } from './project';
+import {
+  KEYBOARD_CODE_PATTERN_SOURCE,
+  addInputAction,
+  createAxis2dInputAction,
+  createKeyboardInputBinding,
+  deleteInputAction,
+  getInputActionReferences,
+  updateInputAction,
+} from './inputActions';
 import type {
   CameraData,
   GameplayComponent,
+  InputAction,
+  KeyboardInputBinding,
   LightData,
   MaterialData,
   NodeKind,
@@ -41,6 +52,9 @@ export type AgentToolName =
   | 'studio_add_component'
   | 'studio_update_component'
   | 'studio_remove_component'
+  | 'studio_list_input_actions'
+  | 'studio_upsert_input_action'
+  | 'studio_delete_input_action'
   | 'studio_update_world_settings'
   | 'studio_add_model_instance'
   | 'studio_get_editor_context'
@@ -62,6 +76,7 @@ export type AgentToolCategory =
   | 'inspect'
   | 'scene'
   | 'gameplay'
+  | 'input'
   | 'world'
   | 'assets'
   | 'editor'
@@ -146,9 +161,14 @@ const primitiveValues = ['box', 'sphere', 'capsule', 'cylinder', 'cone', 'plane'
 const nodeKindValues = ['group', 'mesh', 'model', 'light', 'camera'] as const;
 const componentTypeValues = ['rotate', 'float', 'keyboardMove'] as const;
 const axisValues = ['x', 'y', 'z'] as const;
+const inputAxisValues = ['x', 'y'] as const;
+const inputScaleValues = [-1, 1] as const;
 const colorPattern = '^#[0-9a-fA-F]{6}$';
+const stableIdPattern = '^[A-Za-z0-9][A-Za-z0-9._:-]*$';
+const keyboardCodePattern = KEYBOARD_CODE_PATTERN_SOURCE;
 
 const stringSchema = (description: string): AgentArgumentSchema => ({ type: 'string', minLength: 1, description });
+const stableIdSchema = (description: string): AgentArgumentSchema => ({ type: 'string', minLength: 1, pattern: stableIdPattern, description });
 const booleanSchema = (description: string): AgentArgumentSchema => ({ type: 'boolean', description });
 const numberSchema = (description: string, minimum?: number, maximum?: number): AgentArgumentSchema => ({
   type: 'number',
@@ -176,15 +196,26 @@ const transformSchema: AgentArgumentSchema = {
 };
 
 const nodeIdProperties = { nodeId: stringSchema('Stable scene node identifier.') };
+const keyboardBindingSchema: AgentArgumentSchema = {
+  type: 'object',
+  properties: {
+    id: stableIdSchema('Stable binding identifier. Omit to match an existing binding by code or direction, then generate an identifier when needed.'),
+    code: { type: 'string', minLength: 1, pattern: keyboardCodePattern, description: 'Supported physical KeyboardEvent.code value such as KeyW, ArrowUp, ControlLeft, or Numpad0.' },
+    axis: { type: 'string', enum: inputAxisValues },
+    scale: { type: 'number', enum: inputScaleValues },
+  },
+  required: ['code', 'axis', 'scale'],
+  additionalProperties: false,
+};
 
 const toolDefinitions: AgentToolDefinition[] = [
   {
     name: 'studio_get_project_summary',
     title: 'Get project summary',
-    description: 'Inspect project metadata, world settings, assets, node totals, and gameplay-component totals.',
+    description: 'Inspect project metadata, world settings, assets, named Input Actions, node totals, and gameplay-component totals.',
     category: 'inspect',
     readOnly: true,
-    scopes: ['project.read', 'scene.read', 'world.read', 'assets.read', 'gameplay.read'],
+    scopes: ['project.read', 'scene.read', 'world.read', 'assets.read', 'gameplay.read', 'input.read'],
     risk: { level: 'read', approval: 'none', reversible: true, rationale: 'Reads a cloned project without changing it.' },
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
@@ -194,7 +225,7 @@ const toolDefinitions: AgentToolDefinition[] = [
     description: 'Replace the current project with a fresh validated starter scene. This changes the complete open project and requires explicit review.',
     category: 'scene',
     readOnly: false,
-    scopes: ['project.write', 'scene.delete', 'scene.write'],
+    scopes: ['project.write'],
     risk: { level: 'destructive', approval: 'required', reversible: true, rationale: 'Replaces the complete project document; the editor keeps the previous project as one Undo entry.' },
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
@@ -403,7 +434,7 @@ const toolDefinitions: AgentToolDefinition[] = [
     description: 'Attach keyboard movement, rotation, or floating behavior to a scene node using safe defaults and optional settings.',
     category: 'gameplay',
     readOnly: false,
-    scopes: ['gameplay.write'],
+    scopes: ['gameplay.write', 'input.read'],
     risk: { level: 'low', approval: 'none', reversible: true, rationale: 'Adds one undoable gameplay behavior.' },
     inputSchema: {
       type: 'object',
@@ -419,6 +450,7 @@ const toolDefinitions: AgentToolDefinition[] = [
             distance: numberSchema('Float travel distance.', 0),
             phase: numberSchema('Float phase offset in radians.'),
             plane: { type: 'string', enum: ['xz', 'xy'] },
+            actionId: stableIdSchema('Named Input Action used by Keyboard Move.'),
           },
           additionalProperties: false,
         },
@@ -433,8 +465,8 @@ const toolDefinitions: AgentToolDefinition[] = [
     description: 'Update an existing gameplay component by stable component id.',
     category: 'gameplay',
     readOnly: false,
-    scopes: ['gameplay.write'],
-    risk: { level: 'low', approval: 'none', reversible: true, rationale: 'Changes one undoable gameplay behavior.' },
+    scopes: ['gameplay.write', 'input.read'],
+    risk: { level: 'low', approval: 'when-sensitive', reversible: true, rationale: 'Changes one undoable gameplay behavior; reassigning controls is reviewed as sensitive.' },
     inputSchema: {
       type: 'object',
       properties: {
@@ -449,6 +481,7 @@ const toolDefinitions: AgentToolDefinition[] = [
             distance: numberSchema('Float travel distance.', 0),
             phase: numberSchema('Float phase offset in radians.'),
             plane: { type: 'string', enum: ['xz', 'xy'] },
+            actionId: stableIdSchema('Named Input Action used by Keyboard Move.'),
           },
           additionalProperties: false,
         },
@@ -469,6 +502,50 @@ const toolDefinitions: AgentToolDefinition[] = [
       type: 'object',
       properties: { ...nodeIdProperties, componentId: stringSchema('Stable gameplay component identifier.') },
       required: ['nodeId', 'componentId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_list_input_actions',
+    title: 'List Input Actions',
+    description: 'Inspect every named Input Action, its keyboard bindings, and the gameplay components that reference it.',
+    category: 'input',
+    readOnly: true,
+    scopes: ['input.read', 'gameplay.read', 'scene.read'],
+    risk: { level: 'read', approval: 'none', reversible: true, rationale: 'Reads cloned Input Action data without changing the project.' },
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
+    name: 'studio_upsert_input_action',
+    title: 'Create or update Input Action',
+    description: 'Create a named 2D axis action or update its name and complete keyboard-binding list. Omitted binding IDs are matched by code, then direction, before new IDs are generated.',
+    category: 'input',
+    readOnly: false,
+    scopes: ['input.read', 'input.write', 'gameplay.read'],
+    risk: { level: 'low', approval: 'when-sensitive', reversible: true, rationale: 'Creates or changes one named input mapping; changes to referenced controls are reviewed as sensitive.' },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        actionId: stableIdSchema('Stable Input Action identifier. Omit to create one; a missing identifier is created when name is supplied.'),
+        name: stringSchema('Unique display name for the Input Action.'),
+        bindings: { type: 'array', items: keyboardBindingSchema },
+      },
+      minProperties: 1,
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_delete_input_action',
+    title: 'Delete Input Action',
+    description: 'Delete an unreferenced Input Action. Actions used by gameplay components must be reassigned before deletion.',
+    category: 'input',
+    readOnly: false,
+    scopes: ['input.read', 'input.delete', 'gameplay.read'],
+    risk: { level: 'moderate', approval: 'required', reversible: true, rationale: 'Removes a named input mapping after proving that no gameplay component references it.' },
+    inputSchema: {
+      type: 'object',
+      properties: { actionId: stableIdSchema('Stable Input Action identifier.') },
+      required: ['actionId'],
       additionalProperties: false,
     },
   },
@@ -770,14 +847,15 @@ export const AGENT_TOOL_DEFINITIONS: readonly AgentToolDefinition[] = Object.fre
 export const AGENT_CAPABILITY_MANIFEST: AgentCapabilityManifest = Object.freeze<AgentCapabilityManifest>({
   protocol: 'threejs-game-studio.authoring',
   protocolVersion: 1,
-  projectSchemaVersion: 3,
+  projectSchemaVersion: 4,
   guarantees: [
     'Every tool call validates its arguments and project result.',
     'No tool mutates the ProjectDocument supplied by the caller.',
     'Mutations return a complete nextProject suitable for the editor undo/redo history.',
-    'Stable node, asset, and component identifiers are used instead of hierarchy indexes.',
+    'Stable node, asset, component, Input Action, and binding identifiers are used instead of hierarchy indexes.',
     'Destructive and locked/root-sensitive calls expose approval metadata for human-in-the-loop hosts.',
     'Every definition declares whether it runs against a pure project document or requires the mounted editor host.',
+    'project.write is the explicit full-document lifecycle scope used by reset, import, and history restoration operations.',
     'Editor-host tools use strict argument schemas and never silently fall back to pure project execution.',
     'Local project and model file access remains user-mediated through editor file pickers.',
   ],
@@ -786,6 +864,7 @@ export const AGENT_CAPABILITY_MANIFEST: AgentCapabilityManifest = Object.freeze<
     { id: 'scene', title: 'Scene hierarchy and transforms', read: true, write: true, toolNames: ['studio_list_nodes', 'studio_get_node', 'studio_search_nodes', 'studio_create_primitive', 'studio_create_group', 'studio_update_node', 'studio_duplicate_node', 'studio_delete_node'] },
     { id: 'materials', title: 'Primitive PBR materials', read: true, write: true, toolNames: ['studio_get_node', 'studio_update_node', 'studio_create_primitive'] },
     { id: 'gameplay', title: 'Gameplay components', read: true, write: true, toolNames: ['studio_get_node', 'studio_search_nodes', 'studio_add_component', 'studio_update_component', 'studio_remove_component'] },
+    { id: 'input', title: 'Named Input Actions and keyboard bindings', read: true, write: true, toolNames: ['studio_get_project_summary', 'studio_list_input_actions', 'studio_upsert_input_action', 'studio_delete_input_action', 'studio_update_component'] },
     { id: 'world', title: 'World and rendering settings', read: true, write: true, toolNames: ['studio_get_project_summary', 'studio_update_world_settings'] },
     { id: 'model-assets', title: 'Imported model inspection and instancing', read: true, write: true, toolNames: ['studio_get_project_summary', 'studio_get_node', 'studio_search_nodes', 'studio_add_model_instance'] },
     { id: 'lights-cameras', title: 'Light and camera properties', read: true, write: true, toolNames: ['studio_get_node', 'studio_search_nodes', 'studio_update_node'] },
@@ -1104,12 +1183,18 @@ function executeProjectSummary(project: ProjectDocument, args: unknown): AgentTo
   const data = {
     project: { id: project.id, name: project.name, sceneName: project.sceneName, schemaVersion: project.schemaVersion, updatedAt: project.updatedAt },
     settings: structuredClone(project.settings),
-    totals: { nodes: project.nodes.length, assets: project.assets.length, components: project.nodes.reduce((count, node) => count + node.components.length, 0) },
+    totals: {
+      nodes: project.nodes.length,
+      assets: project.assets.length,
+      components: project.nodes.reduce((count, node) => count + node.components.length, 0),
+      inputActions: project.inputActions.length,
+    },
     byKind,
     byPrimitive,
     components,
     roots: project.nodes.filter((node) => node.parentId === null).map((node) => nodeSummary(project, node)),
     modelAssets: structuredClone(project.assets),
+    inputActions: structuredClone(project.inputActions),
   };
   return { ...emptyResult(project, label, `Project has ${project.nodes.length} nodes and ${project.assets.length} model assets.`), data };
 }
@@ -1389,7 +1474,7 @@ function readComponentChanges(
   const record = readRecord(value ?? {}, path, errors);
   if (!record) return {};
   const allowed = componentType === 'keyboardMove'
-    ? ['enabled', 'speed', 'plane']
+    ? ['enabled', 'speed', 'plane', 'actionId']
     : componentType === 'float'
       ? ['enabled', 'speed', 'axis', 'distance', 'phase']
       : ['enabled', 'speed', 'axis'];
@@ -1402,6 +1487,8 @@ function readComponentChanges(
   if (componentType === 'keyboardMove') {
     const plane = readEnum(record, 'plane', path, errors, ['xz', 'xy'] as const);
     if (plane) changes.plane = plane;
+    const actionId = readString(record, 'actionId', path, errors);
+    if (actionId) changes.actionId = actionId;
   } else {
     const axis = readEnum(record, 'axis', path, errors, axisValues);
     if (axis) changes.axis = axis;
@@ -1427,8 +1514,21 @@ function executeAddComponent(project: ProjectDocument, args: unknown): AgentTool
   const node = nodeId ? getNode(project, nodeId) : undefined;
   if (nodeId && !node) errors.push(`Node "${nodeId}" does not exist.`);
   const changes = type ? readComponentChanges(record.settings, type, errors, 'arguments.settings') : {};
+  const requestedActionId = (changes as { actionId?: string }).actionId;
+  if (requestedActionId && !project.inputActions.some((action) => action.id === requestedActionId)) {
+    errors.push(`Input Action "${requestedActionId}" does not exist.`);
+  }
+  if (type === 'keyboardMove' && !requestedActionId && !project.inputActions.length) {
+    errors.push('Create an Input Action before adding Keyboard Move.');
+  }
   if (errors.length || !node || !nodeId || !type) return invalidResult(project, label, errors, nodeId ?? null);
-  const component = { ...createGameplayComponent(type), ...changes } as GameplayComponent;
+  let component = { ...createGameplayComponent(type), ...changes } as GameplayComponent;
+  if (component.type === 'keyboardMove') {
+    const actionId = component.actionId;
+    if (!project.inputActions.some((action) => action.id === actionId)) {
+      component = { ...component, actionId: project.inputActions[0].id };
+    }
+  }
   const next = updateNode(project, nodeId, { components: [...node.components, component] });
   return successResult(project, next, nodeId, `Add ${type} component`, `Added ${type} behavior to ${node.name}.`, { component });
 }
@@ -1447,6 +1547,10 @@ function executeUpdateComponent(project: ProjectDocument, args: unknown): AgentT
   const component = node?.components.find((candidate) => candidate.id === componentId);
   if (node && componentId && !component) errors.push(`Component "${componentId}" does not exist on ${node.name}.`);
   const changes = component ? readComponentChanges(record.changes, component.type, errors, 'arguments.changes') : {};
+  const requestedActionId = (changes as { actionId?: string }).actionId;
+  if (requestedActionId && !project.inputActions.some((action) => action.id === requestedActionId)) {
+    errors.push(`Input Action "${requestedActionId}" does not exist.`);
+  }
   if (!Object.keys(changes).length && !errors.length) errors.push('arguments.changes must update at least one component property.');
   if (errors.length || !node || !nodeId || !component || !componentId) return invalidResult(project, label, errors, nodeId ?? null);
   const nextComponent = { ...component, ...changes } as GameplayComponent;
@@ -1473,6 +1577,131 @@ function executeRemoveComponent(project: ProjectDocument, args: unknown): AgentT
   if (errors.length || !node || !nodeId || !component || !componentId) return invalidResult(project, label, errors, nodeId ?? null);
   const next = updateNode(project, nodeId, { components: node.components.filter((candidate) => candidate.id !== componentId) });
   return successResult(project, next, nodeId, `Remove ${component.type} component`, `Removed ${component.type} behavior from ${node.name}.`, { componentId });
+}
+
+function readKeyboardBindings(
+  value: unknown,
+  existingBindings: readonly KeyboardInputBinding[] | undefined,
+  errors: string[],
+): KeyboardInputBinding[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    errors.push('arguments.bindings must be an array.');
+    return undefined;
+  }
+  const bindings: KeyboardInputBinding[] = [];
+  const bindingIds = new Set<string>();
+  const claimedExistingIds = new Set<string>();
+  value.forEach((entry, index) => {
+    const path = `arguments.bindings[${index}]`;
+    const record = readRecord(entry, path, errors);
+    if (!record) return;
+    validateKeys(record, ['id', 'code', 'axis', 'scale'], path, errors);
+    const requestedId = readString(record, 'id', path, errors);
+    const code = readString(record, 'code', path, errors, true);
+    const axis = readEnum(record, 'axis', path, errors, inputAxisValues, true);
+    const scale = readNumber(record, 'scale', path, errors);
+    if (scale !== undefined && scale !== -1 && scale !== 1) errors.push(`${path}.scale must be -1 or 1.`);
+    if (!code || !axis || (scale !== -1 && scale !== 1)) return;
+    const matchedExisting = requestedId
+      ? existingBindings?.find((binding) => binding.id === requestedId)
+      : existingBindings?.find((binding) => binding.code === code && !claimedExistingIds.has(binding.id))
+        ?? existingBindings?.find((binding) => binding.axis === axis && binding.scale === scale && !claimedExistingIds.has(binding.id));
+    const id = requestedId ?? matchedExisting?.id;
+    const binding = createKeyboardInputBinding(code, axis, scale, id);
+    if (bindingIds.has(binding.id)) errors.push(`${path}.id duplicates binding id "${binding.id}".`);
+    bindingIds.add(binding.id);
+    if (matchedExisting) claimedExistingIds.add(matchedExisting.id);
+    bindings.push(binding);
+  });
+  return bindings;
+}
+
+function executeListInputActions(project: ProjectDocument, args: unknown): AgentToolResult {
+  const label = 'List Input Actions';
+  const parsed = argsRecord(project, args, label);
+  if ('result' in parsed) return parsed.result;
+  const errors: string[] = [];
+  validateKeys(parsed.record, [], 'arguments', errors);
+  if (errors.length) return invalidResult(project, label, errors);
+  const actions = project.inputActions.map((action) => ({
+    ...structuredClone(action),
+    references: getInputActionReferences(project, action.id),
+  }));
+  return {
+    ...emptyResult(project, label, `Project has ${actions.length} named Input Action${actions.length === 1 ? '' : 's'}.`),
+    data: { actions, total: actions.length },
+  };
+}
+
+function executeUpsertInputAction(project: ProjectDocument, args: unknown): AgentToolResult {
+  const label = 'Create or update Input Action';
+  const parsed = argsRecord(project, args, label);
+  if ('result' in parsed) return parsed.result;
+  const record = parsed.record;
+  const errors: string[] = [];
+  validateKeys(record, ['actionId', 'name', 'bindings'], 'arguments', errors);
+  const actionId = readString(record, 'actionId', 'arguments', errors);
+  const name = readString(record, 'name', 'arguments', errors);
+  const existing = actionId ? project.inputActions.find((action) => action.id === actionId) : undefined;
+  const bindings = readKeyboardBindings(record.bindings, existing?.bindings, errors);
+  if (!actionId && !name) errors.push('arguments.name is required when creating an Input Action without actionId.');
+  if (existing && name === undefined && bindings === undefined) {
+    errors.push('Provide arguments.name or arguments.bindings to update the Input Action.');
+  }
+  if (!existing && actionId && !name) {
+    errors.push(`Input Action "${actionId}" does not exist; arguments.name is required to create it.`);
+  }
+  if (errors.length) return invalidResult(project, label, errors);
+
+  if (existing) {
+    const updatedAction: InputAction = {
+      ...existing,
+      ...(name ? { name } : {}),
+      ...(bindings ? { bindings } : {}),
+    };
+    if (JSON.stringify(updatedAction) === JSON.stringify(existing)) {
+      return emptyResult(project, label, `${existing.name} already has those input bindings.`);
+    }
+    const next = updateInputAction(project, existing.id, { name: updatedAction.name, bindings: updatedAction.bindings });
+    if (!next) {
+      return invalidResult(project, label, [`Another Input Action already uses the name "${updatedAction.name}".`]);
+    }
+    const action = next.inputActions.find((candidate) => candidate.id === existing.id)!;
+    return successResult(project, next, null, `Update ${action.name} controls`, `Updated ${action.name} keyboard bindings.`, { action });
+  }
+
+  const action = createAxis2dInputAction({
+    ...(actionId ? { id: actionId } : {}),
+    name: name!,
+    bindings: bindings ?? [],
+  });
+  const next = addInputAction(project, action);
+  if (!next) {
+    return invalidResult(project, label, [`Input Action id "${action.id}" or name "${action.name}" is already in use.`]);
+  }
+  return successResult(project, next, null, `Create ${action.name} controls`, `Created ${action.name} with ${action.bindings.length} keyboard bindings.`, { action });
+}
+
+function executeDeleteInputAction(project: ProjectDocument, args: unknown): AgentToolResult {
+  const label = 'Delete Input Action';
+  const parsed = argsRecord(project, args, label);
+  if ('result' in parsed) return parsed.result;
+  const record = parsed.record;
+  const errors: string[] = [];
+  validateKeys(record, ['actionId'], 'arguments', errors);
+  const actionId = readString(record, 'actionId', 'arguments', errors, true);
+  const action = actionId ? project.inputActions.find((candidate) => candidate.id === actionId) : undefined;
+  if (actionId && !action) errors.push(`Input Action "${actionId}" does not exist.`);
+  const references = actionId ? getInputActionReferences(project, actionId) : [];
+  if (action && references.length) {
+    const names = [...new Set(references.map((reference) => reference.nodeName))];
+    errors.push(`${action.name} is referenced by ${names.join(', ')}. Reassign those Keyboard Move components before deleting it.`);
+  }
+  if (errors.length || !action || !actionId) return invalidResult(project, label, errors);
+  const next = deleteInputAction(project, actionId);
+  if (!next) return invalidResult(project, label, [`${action.name} could not be deleted.`]);
+  return successResult(project, next, null, `Delete ${action.name} controls`, `Deleted the unreferenced ${action.name} Input Action.`, { actionId });
 }
 
 function readWorldChanges(value: unknown, errors: string[]): Partial<ProjectSettings> {
@@ -1572,6 +1801,9 @@ const executors: Partial<Record<AgentToolName, (project: ProjectDocument, args: 
   studio_add_component: executeAddComponent,
   studio_update_component: executeUpdateComponent,
   studio_remove_component: executeRemoveComponent,
+  studio_list_input_actions: executeListInputActions,
+  studio_upsert_input_action: executeUpsertInputAction,
+  studio_delete_input_action: executeDeleteInputAction,
   studio_update_world_settings: executeUpdateWorld,
   studio_add_model_instance: executeAddModelInstance,
 };
@@ -1701,6 +1933,26 @@ export function assessAgentToolCall(project: ProjectDocument, toolName: string, 
     if (nodeId === 'scene-root') reasons.push('The call targets the scene root.');
     if (toolName === 'studio_update_node' && hasOwn(args, 'parentId')) reasons.push('The call changes scene hierarchy.');
     if (toolName === 'studio_update_node' && (hasOwn(args, 'camera') || hasOwn(args, 'light'))) reasons.push('The call changes game framing or lighting.');
+    if (toolName === 'studio_upsert_input_action' && typeof args.actionId === 'string' && hasOwn(args, 'bindings')) {
+      const action = project.inputActions.find((candidate) => candidate.id === args.actionId);
+      const references = action ? getInputActionReferences(project, action.id) : [];
+      if (action && references.length) {
+        const objectNames = [...new Set(references.map((reference) => reference.nodeName))].join(', ');
+        reasons.push(Array.isArray(args.bindings) && args.bindings.length === 0
+          ? `The call removes every binding from ${action.name}, which controls ${objectNames}.`
+          : `The call changes ${action.name} bindings used by ${objectNames}.`);
+      }
+    }
+    const componentChanges = args.changes;
+    if (toolName === 'studio_update_component' && isRecord(componentChanges) && typeof componentChanges.actionId === 'string') {
+      const componentId = typeof args.componentId === 'string' ? args.componentId : null;
+      const component = node?.components.find((candidate) => candidate.id === componentId);
+      if (component?.type === 'keyboardMove' && component.actionId !== componentChanges.actionId) {
+        const currentAction = project.inputActions.find((action) => action.id === component.actionId)?.name ?? component.actionId;
+        const nextAction = project.inputActions.find((action) => action.id === componentChanges.actionId)?.name ?? componentChanges.actionId;
+        reasons.push(`The call reassigns ${node?.name ?? 'a scene object'} controls from ${currentAction} to ${nextAction}.`);
+      }
+    }
   }
   if (reasons.length && approval === 'when-sensitive') {
     level = level === 'low' || level === 'read' ? 'moderate' : level;

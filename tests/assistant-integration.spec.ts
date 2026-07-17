@@ -4,13 +4,19 @@ type StudioProjectSnapshot = {
   revision: number;
   project: {
     id: string;
+    inputActions: Array<{
+      id: string;
+      name: string;
+      type: 'axis2d';
+      bindings: Array<{ id: string; code: string; axis: 'x' | 'y'; scale: -1 | 1 }>;
+    }>;
     nodes: Array<{
       id: string;
       name: string;
       kind: string;
       transform: { position: [number, number, number] };
       material?: { color: string };
-      components: Array<{ type: string }>;
+      components: Array<{ id?: string; type: string; actionId?: string }>;
     }>;
   };
 };
@@ -148,6 +154,54 @@ test('prompt editing keeps native undo isolated from project history', async ({ 
   expect(afterPromptUndo.project.nodes).toHaveLength(14);
 });
 
+test('Guided Assistant remaps and resets the named Move Input Action through review and Undo', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes('desktop'), 'Named Input Action proposal parity only needs one browser pass.');
+  await openFresh(page);
+  const before = await snapshot(page);
+  const originalMove = before.project.inputActions.find((action) => action.id === 'player.move');
+  expect(originalMove?.bindings.map((binding) => binding.code)).toEqual([
+    'KeyA', 'KeyD', 'KeyW', 'KeyS', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  ]);
+
+  await openAssistant(page);
+  await page.getByTestId('assistant-input').fill('Set Move controls to IJKL');
+  await page.getByTestId('assistant-send').click();
+  const proposal = page.getByTestId('assistant-proposal');
+  await expect(proposal).toBeVisible();
+  await expect(page.getByTestId('assistant-tool-call')).toHaveCount(1);
+  await expect(page.getByTestId('assistant-tool-call')).toHaveAttribute('data-tool-name', 'studio_upsert_input_action');
+  await expect(proposal).toContainText('KeyI');
+  await expect(proposal).toContainText('KeyJ');
+  await expect(proposal).toContainText('KeyK');
+  await expect(proposal).toContainText('KeyL');
+
+  const proposed = await snapshot(page);
+  expect(proposed.project.inputActions).toEqual(before.project.inputActions);
+  await page.getByTestId('assistant-approve').click();
+  await expect(proposal).toBeHidden();
+  const remapped = await snapshot(page);
+  expect(remapped.project.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
+    'KeyJ', 'KeyL', 'KeyI', 'KeyK',
+  ]);
+
+  await page.getByTestId('assistant-input').fill('Reset Move controls');
+  await page.getByTestId('assistant-send').click();
+  await expect(proposal).toBeVisible();
+  await expect(page.getByTestId('assistant-tool-call')).toHaveAttribute('data-tool-name', 'studio_upsert_input_action');
+  await page.getByTestId('assistant-approve').click();
+  await expect(proposal).toBeHidden();
+  const reset = await snapshot(page);
+  expect(reset.project.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
+    'KeyA', 'KeyD', 'KeyW', 'KeyS', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  ]);
+
+  await page.getByTestId('assistant-undo').click();
+  const undoneReset = await snapshot(page);
+  expect(undoneReset.project.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
+    'KeyJ', 'KeyL', 'KeyI', 'KeyK',
+  ]);
+});
+
 test('Advanced review exposes validated arguments and elevates destructive approval', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'Advanced approval semantics only need one browser pass.');
   await openFresh(page);
@@ -213,6 +267,8 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
       tools: expect.arrayContaining([
         expect.objectContaining({ name: 'studio_get_project_summary', readOnly: true }),
         expect.objectContaining({ name: 'studio_create_primitive', readOnly: false }),
+        expect.objectContaining({ name: 'studio_list_input_actions', readOnly: true }),
+        expect.objectContaining({ name: 'studio_upsert_input_action', readOnly: false }),
       ]),
     },
     current: {
@@ -314,6 +370,88 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   });
   await page.evaluate(() => (window as unknown as { __resolveStudioFullscreen?: () => void }).__resolveStudioFullscreen?.());
   await expect(page.getByTestId('assistant-proposal')).toBeHidden();
+});
+
+test('browser bridge covers Input Action reads, reference guards, sensitive reassignment, deletion, and Undo', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes('desktop'), 'The direct Input Action bridge contract only needs one browser pass.');
+  await openFresh(page);
+
+  const request = async (tool: string, argumentsValue: Record<string, unknown>, requestId: string) => {
+    const current = await snapshot(page);
+    return page.evaluate(async ({ toolName, args, baseRevision, id }) => {
+      const bridge = (window as unknown as { __THREE_GAME_STUDIO_AGENT__?: StudioAgentBridge }).__THREE_GAME_STUDIO_AGENT__;
+      if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
+      return bridge.request({ tool: toolName, arguments: args, baseRevision, requestId: id });
+    }, { toolName: tool, args: argumentsValue, baseRevision: current.revision, id: requestId });
+  };
+
+  const listed = await request('studio_list_input_actions', {}, 'qa-list-input-actions');
+  expect(listed).toMatchObject({
+    status: 'completed',
+    requestId: 'qa-list-input-actions',
+    data: [{
+      total: 1,
+      actions: [{
+        id: 'player.move',
+        references: [{ nodeId: 'player-rig', componentId: 'player-move' }],
+      }],
+    }],
+  });
+  await expect(page.getByTestId('assistant-proposal')).toHaveCount(0);
+
+  const protectedDelete = await request('studio_delete_input_action', { actionId: 'player.move' }, 'qa-protected-input-delete');
+  expect(protectedDelete).toMatchObject({
+    status: 'rejected',
+    requestId: 'qa-protected-input-delete',
+    errors: expect.arrayContaining([expect.stringContaining('referenced by Player Rig')]),
+  });
+  await expect(page.getByTestId('assistant-proposal')).toHaveCount(0);
+
+  const createResult = await request('studio_upsert_input_action', {
+    name: 'Bridge Move',
+    bindings: [
+      { code: 'KeyJ', axis: 'x', scale: -1 },
+      { code: 'KeyL', axis: 'x', scale: 1 },
+      { code: 'KeyI', axis: 'y', scale: 1 },
+      { code: 'KeyK', axis: 'y', scale: -1 },
+    ],
+  }, 'qa-create-input-action');
+  expect(createResult).toMatchObject({ status: 'approval_required', requestId: 'qa-create-input-action' });
+  await page.getByTestId('assistant-approve').click();
+  await expect(page.getByTestId('assistant-proposal')).toBeHidden();
+  const created = await snapshot(page);
+  const alternate = created.project.inputActions.find((action) => action.name === 'Bridge Move');
+  expect(alternate).toBeTruthy();
+  if (!alternate) throw new Error('Bridge-created Input Action is missing.');
+
+  const reassignResult = await request('studio_update_component', {
+    nodeId: 'player-rig',
+    componentId: 'player-move',
+    changes: { actionId: alternate.id },
+  }, 'qa-reassign-input-action');
+  expect(reassignResult).toMatchObject({ status: 'approval_required', requestId: 'qa-reassign-input-action' });
+  const proposal = page.getByTestId('assistant-proposal');
+  await expect(proposal).toHaveAttribute('data-risk', 'high-attention');
+  await expect(proposal.locator('.agent-call-review-note')).toContainText('reassigns Player Rig controls');
+  await page.getByTestId('assistant-approve').click();
+  await expect(proposal).toBeHidden();
+  expect((await snapshot(page)).project.nodes.find((node) => node.id === 'player-rig')?.components).toContainEqual(
+    expect.objectContaining({ id: 'player-move', actionId: alternate.id }),
+  );
+
+  await page.getByTestId('assistant-undo').click();
+  expect((await snapshot(page)).project.nodes.find((node) => node.id === 'player-rig')?.components).toContainEqual(
+    expect.objectContaining({ id: 'player-move', actionId: 'player.move' }),
+  );
+
+  const deleteResult = await request('studio_delete_input_action', { actionId: alternate.id }, 'qa-delete-input-action');
+  expect(deleteResult).toMatchObject({ status: 'approval_required', requestId: 'qa-delete-input-action' });
+  await page.getByTestId('assistant-approve').click();
+  await expect(proposal).toBeHidden();
+  expect((await snapshot(page)).project.inputActions.some((action) => action.id === alternate.id)).toBe(false);
+
+  await page.getByTestId('assistant-undo').click();
+  expect((await snapshot(page)).project.inputActions.some((action) => action.id === alternate.id)).toBe(true);
 });
 
 test('browser bridge routes runtime lifecycle and full project reset through explicit approval', async ({ page }, testInfo) => {

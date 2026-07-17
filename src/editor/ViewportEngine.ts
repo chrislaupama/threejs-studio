@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
+import { getInputActionCodes, isInputShortcutChord, resolveInputAction } from './inputActions';
 import { disposeModelResources, parseModelSource, type StoredModelSource } from './modelAssets';
 import type {
   AssetLoadState,
@@ -45,7 +46,6 @@ class MissingModelSourceError extends Error {
 }
 
 const editorOnlyKey = 'studioEditorOnly';
-const movementKeys = new Set(['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright']);
 
 function geometryFor(primitive: PrimitiveType): THREE.BufferGeometry {
   switch (primitive) {
@@ -119,7 +119,8 @@ export class ViewportEngine {
   private runtimeTime = 0;
   private runtimeTick = 0;
   private stepRequested = false;
-  private readonly keys = new Set<string>();
+  private readonly pressedCodes = new Set<string>();
+  private boundInputCodes = new Set<string>();
   private frames = 0;
   private totalFrames = 0;
   private statsElapsed = 0;
@@ -202,6 +203,7 @@ export class ViewportEngine {
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
     window.addEventListener('blur', this.onWindowBlur);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     this.resizeObserver = new ResizeObserver(this.resize);
     this.resizeObserver.observe(canvas.parentElement ?? canvas);
     this.resize();
@@ -256,18 +258,26 @@ export class ViewportEngine {
 
   private readonly onKeyDown = (event: KeyboardEvent) => {
     if (this.mode !== 'play') return;
-    const key = event.key.toLowerCase();
-    if (!movementKeys.has(key)) return;
-    this.keys.add(key);
+    const target = event.target;
+    if (
+      isInputShortcutChord(event) ||
+      (target instanceof HTMLElement && (target.isContentEditable || target.matches('input, textarea, select')))
+    ) return;
+    if (!this.boundInputCodes.has(event.code)) return;
+    this.pressedCodes.add(event.code);
     event.preventDefault();
   };
 
   private readonly onKeyUp = (event: KeyboardEvent) => {
-    this.keys.delete(event.key.toLowerCase());
+    this.pressedCodes.delete(event.code);
   };
 
   private readonly onWindowBlur = () => {
-    this.keys.clear();
+    this.pressedCodes.clear();
+  };
+
+  private readonly onVisibilityChange = () => {
+    if (document.visibilityState !== 'visible') this.onWindowBlur();
   };
 
   private pick(event: PointerEvent) {
@@ -587,6 +597,7 @@ export class ViewportEngine {
 
   setDocument(project: ProjectDocument) {
     this.document = project;
+    this.boundInputCodes = getInputActionCodes(project.inputActions);
     this.scene.background = new THREE.Color(project.settings.background);
     this.scene.fog = project.settings.fogEnabled
       ? new THREE.Fog(project.settings.fogColor, project.settings.fogNear, project.settings.fogFar)
@@ -686,7 +697,7 @@ export class ViewportEngine {
       this.runtimeTick = 0;
       if (this.document) this.setDocument(this.document);
     }
-    if (mode !== 'play') this.keys.clear();
+    if (mode !== 'play') this.onWindowBlur();
     this.stepRequested = false;
     this.updateEditorVisibility();
     this.syncSelection();
@@ -774,13 +785,9 @@ export class ViewportEngine {
 
       for (const component of components) {
         if (!component.enabled || component.type !== 'keyboardMove') continue;
-        let horizontal = (this.keys.has('d') || this.keys.has('arrowright') ? 1 : 0) -
-          (this.keys.has('a') || this.keys.has('arrowleft') ? 1 : 0);
-        let vertical = (this.keys.has('w') || this.keys.has('arrowup') ? 1 : 0) -
-          (this.keys.has('s') || this.keys.has('arrowdown') ? 1 : 0);
-        const length = Math.hypot(horizontal, vertical) || 1;
-        horizontal /= length;
-        vertical /= length;
+        const [horizontal, vertical] = this.document
+          ? resolveInputAction(this.document, component.actionId, this.pressedCodes)
+          : [0, 0];
         runtimeOffset[0] += horizontal * component.speed * simulationDelta;
         if (component.plane === 'xy') runtimeOffset[1] += vertical * component.speed * simulationDelta;
         else runtimeOffset[2] -= vertical * component.speed * simulationDelta;
@@ -856,7 +863,7 @@ export class ViewportEngine {
           viewMode: this.viewMode,
           selectedId: this.selectedId,
           objectCount: this.objects.size,
-          schemaVersion: this.document?.schemaVersion ?? 3,
+          schemaVersion: this.document?.schemaVersion ?? 4,
           assetCount: this.document?.assets.length ?? 0,
         },
         assets: {
@@ -869,6 +876,13 @@ export class ViewportEngine {
         runtime: {
           tick: this.runtimeTick,
           fixedDelta: 1 / 60,
+          input: {
+            pressedCodes: [...this.pressedCodes],
+            actions: Object.fromEntries((this.document?.inputActions ?? []).map((action) => [
+              action.id,
+              resolveInputAction(this.document ?? { inputActions: [] }, action.id, this.pressedCodes),
+            ])),
+          },
           transforms: Object.fromEntries([...this.objects].map(([id, object]) => [id, {
             position: object.position.toArray(),
             rotation: [object.rotation.x, object.rotation.y, object.rotation.z],
@@ -892,7 +906,8 @@ export class ViewportEngine {
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('blur', this.onWindowBlur);
-    this.keys.clear();
+    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+    this.onWindowBlur();
     this.orbit.dispose();
     this.transformControls.dispose();
     for (const [id, object] of this.objects) this.disposeNodeObject(id, object);

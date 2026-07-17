@@ -42,6 +42,20 @@ export interface CameraData {
 
 export type Axis = 'x' | 'y' | 'z';
 
+export interface KeyboardInputBinding {
+  id: string;
+  code: string;
+  axis: 'x' | 'y';
+  scale: -1 | 1;
+}
+
+export interface InputAction {
+  id: string;
+  name: string;
+  type: 'axis2d';
+  bindings: KeyboardInputBinding[];
+}
+
 interface GameplayComponentBase {
   id: string;
   enabled: boolean;
@@ -65,6 +79,7 @@ export interface KeyboardMoveGameplayComponent extends GameplayComponentBase {
   type: 'keyboardMove';
   speed: number;
   plane: 'xz' | 'xy';
+  actionId: string;
 }
 
 export type GameplayComponent =
@@ -136,13 +151,14 @@ export interface ProjectSettings {
 }
 
 export interface ProjectDocument {
-  schemaVersion: 3;
+  schemaVersion: 4;
   id: string;
   name: string;
   sceneName: string;
   updatedAt: string;
   settings: ProjectSettings;
   assets: ModelAssetRecord[];
+  inputActions: InputAction[];
   nodes: SceneNode[];
 }
 

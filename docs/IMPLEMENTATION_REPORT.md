@@ -2,13 +2,23 @@
 
 ## Outcome
 
-Implemented and extended the first functional ThreeJS Game Studio editor vertical slice. The result is a React + TypeScript + Vite web application with a direct Three.js viewport, validated schema-v3 project model, progressive Essentials/Advanced authoring, stackable gameplay components, hierarchy, component inspector, built-in and imported model assets, command history, isolated edit/play modes, revisioned browser persistence, portable project import/export, a single-HTML online game build, responsive layouts, diagnostics, an AI-native typed authoring/proposal/browser-bridge foundation, and browser QA.
+Implemented and extended the first functional ThreeJS Game Studio editor vertical slice. The result is a React + TypeScript + Vite web application with a direct Three.js viewport, validated schema-v4 project model, progressive Essentials/Advanced authoring, project-level named Input Actions, stackable gameplay components, hierarchy, component inspector, built-in and imported model assets, command history, isolated edit/play modes, revisioned browser persistence, portable project import/export, a single-HTML online game build, responsive layouts, diagnostics, an AI-native typed authoring/proposal/browser-bridge foundation, and browser QA.
 
 This report does not claim that the current milestone is a complete Unity/Unreal replacement, a premium AAA game, an externally connectable MCP server, or a model-backed AI service. It establishes the editor/runtime architecture, complete authoring loop, first production asset-pipeline slice, and shared human/agent capability seam needed for later prefab, physics, scripting, animation, audio, UI-canvas, MCP, model-provider, and offline-packaging milestones.
 
+## Iteration 5 — Named Input Actions v1
+
+- Schema v4 adds project-level `axis2d` Input Actions with stable action/binding IDs and explicit Keyboard Move component references. Schema-v3 projects migrate to a stable `player.move` action without changing their WASD/arrow behavior; schema-v1 and schema-v2 imports continue through the complete sequential migration chain.
+- Essentials exposes a readable Player movement preset and one-click Restore defaults. Advanced exposes named-action creation, visibly editable names, reference-aware deletion, and individual keyboard code/axis/value bindings. Duplicate choices are disabled, referenced ownership stays visible on touch layouts, mobile targets are at least 44px, and Keyboard Move components route directly to the shared action editor.
+- Editor Play collects `KeyboardEvent.code` values separately from simulation, clears state on key-up, blur, visibility loss, pause, stop, and disposal, and resolves normalized two-axis intent. Live diagnostics expose pressed codes and resolved action values without putting transient device state into the project document.
+- The downloaded HTML runtime consumes the same serialized action/component references, modifier policy, diagonal normalization, and blur/visibility cleanup behavior; it contains no hard-coded WASD movement branch. A read-only runtime diagnostic seam exposes positions and resolved input for QA/agent inspection without exposing a mutation path.
+- Added three pure AI capabilities to list, upsert, and safely delete Input Actions. Complete validated binding lists have no human-only 32-binding ceiling; omitted stable IDs match by code then direction, and referenced remaps or component reassignment elevate visible review. Existing component tooling can inspect/change `actionId`, project summaries include input totals, and the Guided Assistant proposes IJKL/default mappings through exact nested-value review, revision validation, atomic Apply, and Undo. The combined registry is 32 tools: 18 pure project tools plus 14 editor-host tools.
+- Validation rejects unsupported or hallucinated keyboard codes, invalid axis/value definitions, duplicate action/binding IDs, duplicate names or per-action codes, and dangling component references. A modifier key itself is playable while modified shortcut chords remain isolated. Referenced action deletion is rejected for both human and AI workflows.
+- Browser QA covers real rebinding, duplicate-choice prevention, modifier input, old-key inactivity, new-key movement, input diagnostics, blur/visibility cleanup, Stop restoration, an actually booted downloaded artifact, novice reset, one-step Undo, direct bridge list/reassign/delete/reference-guard flows, and responsive desktop/mobile Input Actions baselines.
+
 ## Iteration 4 — AI-native authoring registry, proposals, and browser bridge
 
-- Added a versioned `threejs-game-studio.authoring` capability manifest for project schema v3. Every advertised tool includes a JSON-compatible input schema, domain, declared scope metadata, read/write effect, risk level, approval policy, reversibility, and rationale.
+- Added a versioned `threejs-game-studio.authoring` capability manifest for project schema v4. Every advertised tool includes a JSON-compatible input schema, domain, declared scope metadata, read/write effect, risk level, approval policy, reversibility, and rationale.
 - Added 15 pure project tools covering project/scene inspection, complete starter-project reset, scene creation and hierarchy, transforms, primitive PBR materials, visibility/locks/shadows, gameplay-component add/update/remove, world/rendering settings, light/camera properties, and instances of existing imported models.
 - Project tools operate on clones, reject unknown/invalid properties, use stable node/asset/component IDs, and validate the complete resulting project. A failed pure project-tool multi-call plan returns the original project rather than a partial mutation.
 - Added a local Guided Assistant that understands a bounded set of scene summaries, creation, transform, material, gameplay, visibility, duplication, deletion, and background requests. It can also parse structured tool-call JSON. It is deterministic and requires no network or API key; it is not described as a language model.
@@ -22,7 +32,7 @@ This report does not claim that the current milestone is a complete Unity/Unreal
 
 ## Iteration 3 — Imported model asset pipeline and schema v3
 
-- Schema v3 adds a validated model asset catalog and explicit model scene nodes while keeping binary source data out of the project document. Schema v1 runs sequential v1→v2→v3 migration; schema v2 adds `assets: []`; schema v4+ is rejected.
+- Schema v3 added a validated model asset catalog and explicit model scene nodes while keeping binary source data out of the project document. Schema v1 runs sequential v1→v2→v3 migration; schema v2 adds `assets: []`; schema v4 now adds Input Actions and schema v5+ is rejected.
 - Self-contained GLB and glTF files with embedded data resources are parsed before any project mutation. External buffers/images, Draco, Meshopt, KTX2, malformed files, empty scenes, and files over 100 MiB fail atomically with actionable guidance.
 - Every import records file size, mesh/triangle/material/texture counts, animation clip names, bounds, and scale/performance warnings. Essentials shows a plain-language model summary and fit controls; Advanced shows the full diagnostics and stable asset ID.
 - Model bytes are stored as revisioned `ArrayBuffer` records in IndexedDB. Relinking creates a new revision so Undo can still reference the previous source; localStorage continues to hold the small authoritative document.
@@ -38,7 +48,7 @@ This report does not claim that the current milestone is a complete Unity/Unreal
 - Advanced reveals the denser viewport, renderer, pause/step, Scene/Game, local/global, snapping, project assets, console, IDs, and component-specific controls. Switching experience never changes project data or history.
 - Schema v2 replaces the single optional behavior with a stable `components[]` collection. Rotate, Float, and Keyboard Move can be composed on the same object.
 - Schema-v1 behavior data migrates exactly once. Imports reject future schemas and malformed nested values with paths such as `nodes[8].components[0].speed` without replacing the open project.
-- Play accepts WASD/arrow input, Pause freezes simulation, Step advances exactly `1/60`, and Stop restores authored transforms. Every mutation entry point is guarded while Play/Paused/Preview is active.
+- Play accepts the migrated default Move action, Pause freezes simulation, Step advances exactly `1/60`, and Stop restores authored transforms. Every mutation entry point is guarded while Play/Paused/Preview is active.
 - World controls now include background, fog enable/color/range, exposure, grid sizing, and project shadows, with simpler defaults in Essentials and full values in Advanced.
 
 ## Game design brief (editor authoring brief)
@@ -112,6 +122,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - `src/App.tsx`: editor orchestration, history, persistence, menus, shortcuts, panel state, Play/Stop, import/export/build.
 - `src/editor/types.ts`: serializable project/entity/component contracts.
 - `src/editor/project.ts`: starter scene, document operations, built-in assets, validation, downloads, standalone runtime builder.
+- `src/editor/inputActions.ts`: named movement defaults, stable binding/action creation, immutable CRUD, reference safety, configured-code collection, and normalized intent resolution.
 - `src/editor/modelAssets.ts`: self-contained glTF validation/parsing, diagnostics, warnings, and imported-resource disposal.
 - `src/editor/assetStore.ts`: revisioned IndexedDB sources, data-URL encoding, and portable editable project packages.
 - `src/editor/agentTools.ts`: versioned capability manifest, pure project tools, argument/result validation, scopes, and contextual risk/approval assessment.
@@ -119,12 +130,14 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - `src/editor/AgentPanel.tsx`: responsive assistant transcript, context, suggestions, proposal review, effects, approval, and discard UI.
 - `src/editor/ViewportEngine.ts`: Three.js lifecycle, reconciliation, picking, controls, gizmos, cameras, gameplay-component runtime, diagnostics, disposal.
 - `src/editor/components.tsx`: hierarchy, inspector, assets, console, form controls.
+- `src/editor/InputActionsEditor.tsx`: Essentials movement preset plus Advanced named-action and keyboard-binding authoring.
 - `src/styles.css`: complete responsive editor visual system.
 - `tests/model.spec.ts`: sequential migration, nested asset/reference validation, runtime embedding, stable presets, and component composition.
+- `tests/input-actions.spec.ts`: defaults, immutable operations, reference protection, normalized resolution, malformed/dangling validation, and generated-runtime input contract.
 - `tests/agent-tools.spec.ts`: capability stability, immutable inspection, scene/material/gameplay/world/model coverage, atomic invalid calls, and contextual approval boundaries.
 - `tests/assistant-integration.spec.ts`: desktop/mobile Assistant entry points, no-mutation-before-approval, atomic pure project-tool Apply, single-step Undo, and browser-bridge manifest/snapshot/request/subscription coverage.
 - `tests/fixtures/modelFixtures.ts`: deterministic 996-byte GLB and external-resource glTF fixtures generated in memory.
-- `tests/visual.spec.ts`: real-action Essentials journey, Play isolation, stacked components, model import/persistence/reuse/missing recovery/relink/package/build, keyboard input, pause/step/stop, and nonblank canvas smoke tests.
+- `tests/visual.spec.ts`: real-action Essentials journey, Play isolation, stacked components, named-action rebinding/reset/build/diagnostics/Undo, model import/persistence/reuse/missing recovery/relink/package/build, keyboard input, pause/step/stop, and nonblank canvas smoke tests.
 - `tests/visual-regression.spec.ts` plus snapshots: deterministic Essentials, Advanced, imported-model viewport, and Advanced model-authoring desktop/mobile baselines.
 - `README.md` and `docs/PRODUCT_PLAN.md`: usage, architecture, boundaries, and roadmap.
 - Existing package/build/test configuration is reused without adding runtime dependencies.
@@ -140,12 +153,12 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - Menus, command palette, local autosave, editable project package import/export, and model-embedding web build.
 - Studio Assistant open/close, project context and revision, guided read results, typed write proposals, Discard/Apply, atomic pure project-tool commit, visible scene result, and one-step Undo.
 - Versioned browser bridge capability/snapshot reads, revision-checked proposal/application, editor-host controls, and structured error/event results without renderer or DOM exposure.
-- Narrow-screen first load with viewport primary, slide-over panels, 42px compact panel controls, and desktop recommendation.
+- Narrow-screen first load with viewport primary, slide-over panels, 44px Input Action controls, safe scroll clearance above persistent panel triggers, and desktop recommendation.
 
 ## QA/release evidence
 
 - `npm run build`: pass with Vite 8.1.5 and TypeScript 6.0.3.
-- `npm test`: 43 passed, 7 intentionally skipped desktop-only duplicate cases on mobile. The suite runs 50 cases across desktop Chromium and mobile WebKit; AI tool/bridge/approval/concurrent-and-in-flight proposal ownership/stale-plan/runtime/reset/atomic-Undo/prompt-history/destructive-review contracts, migration, components, model persistence, shared-resource, missing/relink, portable-package, embedded-build, import-failure, and ten active visual-baseline checks are covered.
+- Complete browser suite: 63 passed, 11 intentionally skipped desktop-only duplicate cases on mobile. The suite runs 74 cases across desktop Chromium and mobile WebKit; AI tool/bridge/approval/concurrent-and-in-flight proposal ownership/stale-plan/runtime/reset/atomic-Undo/prompt-history/destructive-review contracts, direct Input Action bridge coverage, migration, components, model persistence, shared-resource, missing/relink, portable-package, executable standalone-build input/cleanup, import-failure, and twelve active visual-baseline checks are covered.
 - Production preview URL tested: `http://127.0.0.1:4188/`.
 - Production interaction: Play → Escape restored `mode-edit`; Build downloaded `starter-project-web.html` without failure.
 - Browser application errors: none. Page errors: none. Headless Chromium emitted only driver-level `ReadPixels` performance notices while screenshots were captured.
@@ -165,7 +178,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - Determinism: gameplay components do not advance in Edit mode; transitions/animations and dynamic toast/FPS/autosave overlays are hidden for baseline capture.
 - Update command: `npm test -- --update-snapshots=all`.
 - Compare command: `npm test`.
-- Baselines: ten active snapshots under `tests/visual-regression.spec.ts-snapshots/`, covering `studio-{essentials,advanced,assistant,imported-model,model-authoring}` on both browser profiles.
+- Baselines: twelve active snapshots under `tests/visual-regression.spec.ts-snapshots/`, covering `studio-{essentials,advanced,input-actions,assistant,imported-model,model-authoring}` on both browser profiles.
 - Threshold: `maxDiffPixelRatio: 0.012` for full editor surfaces and `0.006` for imported-model canvas crops; no masks.
 - Flake risk: minor WebGL antialiasing differences across operating systems/GPU drivers; smoke tests separately sample canvas pixels and interactions.
 
@@ -176,7 +189,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - DPR capped at 2; current mobile profile renders at 2×.
 - Scene nodes are reconciled in place; structural changes create/dispose objects while inspector edits update existing resources.
 - Geometry/material/control/listener/renderer disposal is implemented.
-- Current production bundle: 1,022.63 KB main JS / 273.32 KB gzip, 43.87 KB lazy GLTFLoader chunk / 13.06 KB gzip, and 64.66 KB CSS / 13.22 KB gzip. Three.js is the dominant runtime dependency; Vite still reports the main chunk above the 900 KB warning threshold.
+- Current production bundle: 1,051.59 KB main JS / 281.42 KB gzip, 43.87 KB lazy GLTFLoader chunk / 13.06 KB gzip, and 71.84 KB CSS / 14.42 KB gzip. Three.js is the dominant runtime dependency; Vite still reports the main chunk above the 900 KB warning threshold.
 
 ## Remaining risks and planned work
 
@@ -190,7 +203,7 @@ The editor preview and generated page both consume the same `ProjectDocument` sc
 - Model ingestion is intentionally limited to self-contained, uncompressed GLB or data-URI glTF up to 100 MiB. Multi-file packages, Draco/Meshopt/KTX2, standalone texture/audio/environment import, animation playback, LOD generation, and mesh optimization remain roadmap work.
 - Portable editable packages base64-encode model bytes in memory, which is simple and deterministic for the current limit but not the final large-project ZIP format.
 - Imported models share parsed geometry/material/texture ownership, but repeated instances still produce separate draw calls; automatic batching/instancing is planned.
-- Prefabs, physics, input mapping, safe user scripting, runtime UI, multi-scene flow, and cloud collaboration remain roadmap work.
-- The 1,022 KB main JavaScript chunk still needs deeper editor/runtime code splitting before a production hosting milestone.
+- Prefabs, physics, expanded input contexts/devices, safe user scripting, runtime UI, multi-scene flow, and cloud collaboration remain roadmap work.
+- The 1,051 KB main JavaScript chunk still needs deeper editor/runtime code splitting before a production hosting milestone.
 - The editor is responsive for review and compact authoring, but desktop remains recommended for precision transforms.
 - No bot playtest was added because this milestone is an editor authoring tool, not a release-ready game with objective/difficulty/failure gameplay.

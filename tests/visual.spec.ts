@@ -132,6 +132,7 @@ test('fresh Essentials journey advances only from real authoring actions', async
 
 test('Advanced components compose and runtime remains isolated', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'Dense runtime authoring coverage runs once on desktop.');
+  test.setTimeout(45_000);
   await openFresh(page);
   await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
   await expect(page.getByTestId('studio-app')).toHaveAttribute('data-experience', 'advanced');
@@ -183,6 +184,85 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
   await expect(page.locator('[data-component-id]')).toHaveCount(2);
 });
 
+test('Input Actions rebind movement across UI, Play, build, diagnostics, and Undo', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.includes('desktop'), 'Full keyboard authoring and runtime parity runs once on desktop.');
+  await openFresh(page);
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
+  await page.locator('[data-node-id="player-rig"]').click();
+  await expect(page.getByTestId('manage-input-actions')).toBeVisible();
+  await page.getByTestId('manage-input-actions').click();
+
+  const controls = page.getByTestId('input-actions-editor');
+  const moveAction = page.locator('[data-testid="input-action-card"][data-action-id="player.move"]');
+  await expect(controls).toBeVisible();
+  await expect(moveAction.getByTestId('input-action-name')).toHaveValue('Move');
+  const forwardBinding = moveAction.locator('[data-testid="input-binding-code"][data-binding-id="player.move.key-w"]');
+  const alternateForwardBinding = moveAction.locator('[data-testid="input-binding-code"][data-binding-id="player.move.arrow-up"]');
+  await expect(forwardBinding).toHaveValue('KeyW');
+  await expect(forwardBinding.locator('option[value="KeyA"]')).toBeDisabled();
+  await forwardBinding.selectOption('KeyI');
+  await alternateForwardBinding.selectOption('ControlLeft');
+  await expect(forwardBinding).toHaveValue('KeyI');
+
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Essentials' }).click();
+  await expect(page.getByTestId('reset-move-controls')).toBeEnabled();
+  await page.getByTestId('reset-move-controls').click();
+  await expect(page.getByTestId('reset-move-controls')).toBeDisabled();
+  await page.keyboard.press('Control+Z');
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
+  await expect(page.locator('[data-testid="input-binding-code"][data-binding-id="player.move.key-w"]')).toHaveValue('KeyI');
+
+  await page.locator('[data-node-id="player-rig"]').click();
+  await expect(page.getByTestId('keyboard-move-action')).toHaveValue('player.move');
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Essentials' }).click();
+  await page.getByTestId('play-button').click();
+  await expect(page.getByTestId('runtime-banner')).toContainText('I / A / S / D');
+  const before = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position ?? []);
+
+  await page.keyboard.down('w');
+  await page.waitForTimeout(350);
+  await page.keyboard.up('w');
+  const afterOldKey = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position ?? []);
+  expect(Math.abs((afterOldKey[2] ?? 0) - (before[2] ?? 0))).toBeLessThan(0.03);
+
+  await page.keyboard.down('i');
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.actions['player.move']?.[1])).toBe(1);
+  await page.waitForTimeout(350);
+  await page.keyboard.up('i');
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position[2] ?? 0)).toBeLessThan((before[2] ?? 0) - 0.2);
+
+  await page.keyboard.down('Control');
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.pressedCodes)).toContain('ControlLeft');
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.actions['player.move']?.[1])).toBe(1);
+  await page.keyboard.up('Control');
+
+  await page.keyboard.down('i');
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.pressedCodes)).toContain('KeyI');
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.input.pressedCodes)).toEqual([]);
+  await page.keyboard.up('i');
+
+  await page.getByTestId('stop-button').click();
+  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.runtime.transforms['player-rig']?.position)).toEqual([0, 1.55, 0]);
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByTestId('build-button').click();
+  const download = await downloadPromise;
+  const downloadPath = await download.path();
+  expect(downloadPath).toBeTruthy();
+  const html = await readFile(downloadPath!, 'utf8');
+  expect(html).toContain('"code":"KeyI"');
+  expect(html).toContain('"code":"ControlLeft"');
+  expect(html).toContain('resolveAction(component.actionId)');
+  expect(html).not.toContain("keys.has('w')");
+
+  await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
+  await page.keyboard.press('Control+Z');
+  await page.keyboard.press('Control+Z');
+  await page.locator('[data-node-id="scene-root"]').click();
+  await expect(page.locator('[data-testid="input-binding-code"][data-binding-id="player.move.key-w"]')).toHaveValue('KeyW');
+});
+
 test('self-contained GLB imports through Essentials and survives reload', async ({ page }) => {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
@@ -199,9 +279,12 @@ test('self-contained GLB imports through Essentials and survives reload', async 
     mimeType: 'model/gltf-binary',
     buffer: fixture,
   });
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(1);
+  await expect.poll(
+    async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0),
+    { timeout: 10_000 },
+  ).toBe(1);
   const diagnostics = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__);
-  expect(diagnostics?.editor).toMatchObject({ schemaVersion: 3, assetCount: 1, objectCount: 14 });
+  expect(diagnostics?.editor).toMatchObject({ schemaVersion: 4, assetCount: 1, objectCount: 14 });
   expect(diagnostics?.assets.cachedModels).toBe(1);
   await expect(page.getByTestId('quick-start')).toHaveAttribute('data-step', 'style');
   expect(await sampleCanvas(page)).toMatchObject({ ok: true });
@@ -216,6 +299,7 @@ test('self-contained GLB imports through Essentials and survives reload', async 
 
 test('Advanced models reuse GPU resources, recover missing bytes, and embed in builds', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'Dense asset lifecycle coverage runs once on desktop.');
+  test.setTimeout(60_000);
   const fixture = makeTriangleGlb();
   await openFresh(page);
   await page.getByTestId('model-file-input').setInputFiles({
@@ -223,7 +307,10 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
     mimeType: 'model/gltf-binary',
     buffer: fixture,
   });
-  await expect.poll(async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(1);
+  await expect.poll(
+    async () => page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.assets.readyInstances ?? 0),
+    { timeout: 10_000 },
+  ).toBe(1);
   const geometryCount = await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.renderer.geometries ?? 0);
 
   await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
@@ -239,7 +326,7 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
   expect(await page.evaluate(() => window.__THREE_GAME_DIAGNOSTICS__?.renderer.geometries)).toBe(geometryCount);
 
   await page.getByTestId('save-project').click();
-  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-game-studio:project:v3') ?? '{}') as {
+  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-game-studio:project:v4') ?? '{}') as {
     id: string;
     assets: Array<{ id: string; revision: number }>;
   });

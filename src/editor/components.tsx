@@ -30,12 +30,14 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { InputActionsEditor } from './InputActionsEditor';
 import { createGameplayComponent } from './project';
 import { formatBytes, formatTriangles } from './modelAssets';
 import type {
   AssetStatus,
   ConsoleEntry,
   GameplayComponent,
+  InputAction,
   PrimitiveType,
   ProjectDocument,
   ProjectSettings,
@@ -406,6 +408,8 @@ interface InspectorProps {
   assetStatuses: Record<string, AssetStatus>;
   onUpdate: (node: SceneNode, label: string) => void;
   onUpdateSettings: (settings: ProjectSettings, label: string) => void;
+  onUpdateInputActions: (next: InputAction[], label: string) => void;
+  onManageInputActions: () => void;
   onRelinkModel: (assetId: string) => void;
   onDelete: () => void;
 }
@@ -423,21 +427,25 @@ function ComponentHeading({ icon, title, onRemove }: { icon: ReactNode; title: s
 const componentCopy: Record<GameplayComponent['type'], { essential: string; advanced: string; description: string }> = {
   rotate: { essential: 'Spin', advanced: 'Rotate Component', description: 'Spin continuously while the game is playing.' },
   float: { essential: 'Float', advanced: 'Float Component', description: 'Gently bob along one axis while playing.' },
-  keyboardMove: { essential: 'Move with Keyboard', advanced: 'Keyboard Move Component', description: 'Control this object with WASD or the arrow keys.' },
+  keyboardMove: { essential: 'Player movement', advanced: 'Input Move Component', description: 'Move this object with a named two-axis control action.' },
 };
 
 function GameplayComponentEditor({
   component,
   experience,
   disabled,
+  inputActions,
   onChange,
   onRemove,
+  onManageInputActions,
 }: {
   component: GameplayComponent;
   experience: ExperienceLevel;
   disabled: boolean;
+  inputActions: InputAction[];
   onChange: (component: GameplayComponent, label: string) => void;
   onRemove: () => void;
+  onManageInputActions: () => void;
 }) {
   const copy = componentCopy[component.type];
   const icon = component.type === 'keyboardMove' ? <Keyboard size={14} /> : component.type === 'float' ? <Waves size={14} /> : <FileBox size={14} />;
@@ -459,6 +467,27 @@ function GameplayComponentEditor({
       <div className="component-body property-stack">
         <p className="component-description">{copy.description}</p>
         <label className="property-row checkbox-row"><span className="property-label">Active</span><label><input type="checkbox" checked={component.enabled} disabled={disabled} onChange={(event) => onChange({ ...component, enabled: event.target.checked }, 'Toggle gameplay component')} /> Run in Play mode</label></label>
+        {component.type === 'keyboardMove' ? (
+          <div className="input-action-property-group">
+            <label className="property-row input-action-property">
+              <span className="property-label">Controls</span>
+              <select
+                value={component.actionId}
+                disabled={disabled || inputActions.length === 0}
+                aria-label="Movement input action"
+                data-testid="keyboard-move-action"
+                onChange={(event) => onChange({ ...component, actionId: event.target.value }, 'Change movement input action')}
+              >
+                {!inputActions.some((action) => action.id === component.actionId) ? <option value={component.actionId}>Missing action</option> : null}
+                {!inputActions.length ? <option value="">No movement actions</option> : null}
+                {inputActions.map((action) => <option value={action.id} key={action.id}>{action.name}</option>)}
+              </select>
+            </label>
+            <button type="button" className="manage-input-actions" data-testid="manage-input-actions" onClick={onManageInputActions}>
+              <Keyboard size={12} /> {experience === 'essentials' ? 'Edit controls' : 'Manage Input Actions'}
+            </button>
+          </div>
+        ) : null}
         <label className="property-row"><span className="property-label">Speed</span><NumberField label="×" value={component.speed} step={0.1} disabled={disabled} onCommit={(value) => onChange({ ...component, speed: Math.max(0, value) }, 'Change component speed')} /></label>
         {experience === 'advanced' ? advancedFields : (
           <details className="advanced-settings" data-testid="advanced-settings-toggle"><summary>Advanced settings</summary>{advancedFields}</details>
@@ -468,7 +497,7 @@ function GameplayComponentEditor({
   );
 }
 
-export function InspectorPanel({ node, disabled, project, experience, assetStatuses, onUpdate, onUpdateSettings, onRelinkModel, onDelete }: InspectorProps) {
+export function InspectorPanel({ node, disabled, project, experience, assetStatuses, onUpdate, onUpdateSettings, onUpdateInputActions, onManageInputActions, onRelinkModel, onDelete }: InspectorProps) {
   const [componentMenuOpen, setComponentMenuOpen] = useState(false);
   if (!node) {
     return (
@@ -537,6 +566,15 @@ export function InspectorPanel({ node, disabled, project, experience, assetStatu
             data-testid="inspector-name"
           />
         </div>
+
+        {node.id === 'scene-root' ? (
+          <InputActionsEditor
+            project={project}
+            experience={experience}
+            disabled={disabled}
+            onChange={onUpdateInputActions}
+          />
+        ) : null}
 
         {node.id !== 'scene-root' ? <details className="component" open>
           <summary><ComponentHeading icon={<Box size={14} />} title="Transform" /></summary>
@@ -665,8 +703,10 @@ export function InspectorPanel({ node, disabled, project, experience, assetStatu
             component={component}
             experience={experience}
             disabled={disabled}
+            inputActions={project.inputActions}
             onChange={(nextComponent, label) => onUpdate({ ...node, components: node.components.map((entry) => entry.id === component.id ? nextComponent : entry) }, label)}
             onRemove={() => onUpdate({ ...node, components: node.components.filter((entry) => entry.id !== component.id) }, `Remove ${componentCopy[component.type].essential} component`)}
+            onManageInputActions={onManageInputActions}
           />
         ))}
 
@@ -676,7 +716,20 @@ export function InspectorPanel({ node, disabled, project, experience, assetStatu
             {componentMenuOpen ? (
               <div className="component-menu">
                 <span>{experience === 'essentials' ? 'Choose motion' : 'Gameplay components'}</span>
-                <button type="button" onClick={() => { onUpdate({ ...node, components: [...node.components, createGameplayComponent('keyboardMove')] }, 'Add Keyboard Move component'); setComponentMenuOpen(false); }}><Keyboard size={14} /><span><strong>Move with Keyboard</strong><small>Control with WASD or arrow keys</small></span></button>
+                <button
+                  type="button"
+                  disabled={!project.inputActions.length}
+                  title={!project.inputActions.length ? 'Create a movement action in MainWorld Controls first.' : undefined}
+                  onClick={() => {
+                    const component = createGameplayComponent('keyboardMove');
+                    const actionId = project.inputActions.some((action) => action.id === component.actionId)
+                      ? component.actionId
+                      : project.inputActions[0]?.id;
+                    if (!actionId) return;
+                    onUpdate({ ...node, components: [...node.components, { ...component, actionId }] }, 'Add Input Move component');
+                    setComponentMenuOpen(false);
+                  }}
+                ><Keyboard size={14} /><span><strong>Move with controls</strong><small>{project.inputActions.length ? 'Use a named movement action' : 'Create an Input Action in MainWorld first'}</small></span></button>
                 <button type="button" onClick={() => { onUpdate({ ...node, components: [...node.components, createGameplayComponent('rotate')] }, 'Add Rotate component'); setComponentMenuOpen(false); }}><FileBox size={14} /><span><strong>Spin</strong><small>Rotate continuously in Play mode</small></span></button>
                 <button type="button" onClick={() => { onUpdate({ ...node, components: [...node.components, createGameplayComponent('float')] }, 'Add Float component'); setComponentMenuOpen(false); }}><Waves size={14} /><span><strong>Float</strong><small>Gently bob along an axis</small></span></button>
               </div>

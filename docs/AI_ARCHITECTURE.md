@@ -7,7 +7,7 @@ ThreeJS Game Studio is being built as an AI-native editor, not as a human editor
 The current milestone ships:
 
 - A versioned authoring capability manifest with JSON-compatible argument schemas, declared scope metadata, read/write effects, risk levels, and approval policies.
-- Fifteen pure, validated project tools for inspection, full starter-project reset, and undoable scene, material, gameplay, world, light, camera, and existing-model-instance changes.
+- Eighteen pure, validated project tools for inspection, full starter-project reset, and undoable scene, material, gameplay, named Input Action, world, light, camera, and existing-model-instance changes.
 - A local Guided Assistant that turns a deliberately limited set of plain-language requests or structured tool JSON into reviewable proposals. It is a deterministic planner, not a model-backed AI service.
 - A proposal surface that shows each planned call before any write is applied. Accepted pure project-tool plans validate atomically and enter the editor as one history step.
 - Fourteen browser-host definitions for editor-only capabilities such as selection, viewport controls, Play/Stop, history, console, layout, save/export/build, and user-mediated import requests.
@@ -63,7 +63,7 @@ The durable project model is the trust boundary:
 
 ## Capability contract
 
-The capability protocol is currently `threejs-game-studio.authoring` version 1 over project schema v3. The manifest contains 29 tools: 15 pure project tools and 14 mounted-editor host tools. Tool names use the `studio_` namespace. Each definition advertises:
+The capability protocol is currently `threejs-game-studio.authoring` version 1 over project schema v4. The manifest contains 32 tools: 18 pure project tools and 14 mounted-editor host tools. Tool names use the `studio_` namespace. Each definition advertises:
 
 - Stable name, title, and description.
 - Domain and declared scopes.
@@ -74,13 +74,14 @@ The capability protocol is currently `threejs-game-studio.authoring` version 1 o
 - Reversibility and a plain-language rationale.
 - Whether execution belongs to the pure project layer or browser host.
 
-Scope names in the current manifest describe the access a future authenticated host must grant; the in-page bridge does not authenticate callers or enforce scope grants. It assumes the JavaScript executing in the editor page is trusted. Mutations still cross the editor-owned proposal boundary, while permitted read-only calls return immediately. Authenticated identity and scope enforcement belong to the planned companion adapter.
+Scope names in the current manifest describe the access a future authenticated host must grant; the in-page bridge does not authenticate callers or enforce scope grants. `project.write` is the explicit full-document lifecycle super-scope for reset, import, and history restoration, while narrower tools enumerate their read/write dependencies. The bridge assumes the JavaScript executing in the editor page is trusted. Mutations still cross the editor-owned proposal boundary, while permitted read-only calls return immediately. Authenticated identity and scope enforcement belong to the planned companion adapter.
 
 Representative pure project tools include:
 
 - Project lifecycle and inspection: `studio_get_project_summary`, `studio_reset_project`, `studio_list_nodes`, `studio_get_node`, `studio_search_nodes`.
 - Scene: `studio_create_primitive`, `studio_create_group`, `studio_update_node`, `studio_duplicate_node`, `studio_delete_node`.
 - Gameplay: `studio_add_component`, `studio_update_component`, `studio_remove_component`.
+- Input: `studio_list_input_actions`, `studio_upsert_input_action`, `studio_delete_input_action`; Keyboard Move components reference named actions by stable `actionId`.
 - World: `studio_update_world_settings`.
 - Assets: `studio_add_model_instance` for an existing, trusted project asset.
 
@@ -96,7 +97,8 @@ Unknown tools, unsupported properties, invalid type-specific fields, missing ref
 | Scene hierarchy | Yes | Yes | Project tools | Create, rename, reparent, duplicate, delete, visibility, locks, and stable IDs. |
 | Transforms | Yes | Yes | Project tools | Position, Euler rotation, and scale; no direct `Object3D` access. |
 | Primitive materials | Yes | Yes | Project tools | Base/emissive color, intensity, metalness, roughness, and shadows. |
-| Gameplay components | Yes | Yes | Project tools | Add/update/remove Rotate, Float, and Keyboard Move by stable component ID. |
+| Gameplay components | Yes | Yes | Project tools | Add/update/remove Rotate, Float, and Keyboard Move by stable component ID; Keyboard Move can be reassigned by stable Input Action ID. |
+| Named Input Actions | Yes | Yes | Project tools | List/create/update complete action bindings by stable IDs without a human-only binding-count ceiling. Omitted IDs follow matching codes/directions, referenced remaps and component reassignment receive contextual review, and referenced actions cannot be deleted until reassigned. |
 | World/render settings | Yes | Yes | Project tools | Background, fog, exposure, grid, and realtime shadows. |
 | Lights and cameras | Yes | Yes | Project tools | Type-specific validated properties; sensitive framing/lighting edits carry approval metadata. |
 | Imported model metadata | Yes | Indirect | Project + browser host | Existing assets can be instanced and model nodes resized; source selection/relink remains user-mediated. |
@@ -220,7 +222,7 @@ Do not record binary contents, access tokens, provider secrets, or raw prompts b
 
 ## Delivery phases
 
-1. **Shipped foundation:** typed manifest, pure project tools, capability/risk metadata, Guided Assistant, proposal review, atomic pure project-tool batch execution, browser-host tools, trusted same-page integration bridge, revision guard, normal history integration, and contract/browser tests.
+1. **Shipped foundation:** typed manifest, pure project tools including keyboard-first named Input Actions, capability/risk metadata, Guided Assistant, proposal review, atomic pure project-tool batch execution, browser-host tools, trusted same-page integration bridge, revision guard, normal history integration, and contract/browser tests.
 2. **Parity hardening:** move remaining human-only project mutations behind shared commands, add schema-field coverage checks, durable operation envelopes, actor attribution, and append-only events.
 3. **Local MCP sidecar:** stdio MCP adapter, loopback pairing, read-only discovery first, scoped writes, cancellation, and audit linkage.
 4. **Staged assets/builds:** out-of-band binary transfer, digests, quotas, task progress, build artifact handles, and relink transactions.

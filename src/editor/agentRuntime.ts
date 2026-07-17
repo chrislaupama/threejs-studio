@@ -5,6 +5,7 @@ import {
   type AgentToolName,
   type AgentToolResult,
 } from './agentTools';
+import { createDefaultMoveInputAction, DEFAULT_MOVE_ACTION_ID } from './inputActions';
 import { getNode } from './project';
 import type { GameplayComponent, PrimitiveType, ProjectDocument, SceneNode, Vec3 } from './types';
 
@@ -86,6 +87,67 @@ function findNamedNode(project: ProjectDocument, name: string): SceneNode | unde
   const normalized = name.trim().replace(/[.!?]+$/, '').toLowerCase();
   return project.nodes.find((node) => node.name.toLowerCase() === normalized)
     ?? project.nodes.find((node) => node.name.toLowerCase().includes(normalized));
+}
+
+function findMoveInputAction(project: ProjectDocument) {
+  const movementComponent = project.nodes.flatMap((node) => node.components)
+    .find((component) => component.id === 'player-move' && component.type === 'keyboardMove')
+    ?? project.nodes.flatMap((node) => node.components).find((component) => component.type === 'keyboardMove');
+  const actionId = movementComponent?.type === 'keyboardMove' ? movementComponent.actionId : undefined;
+  return project.inputActions.find((action) => action.id === actionId)
+    ?? project.inputActions.find((action) => action.id === DEFAULT_MOVE_ACTION_ID)
+    ?? project.inputActions.find((action) => action.name.trim().toLowerCase() === 'move');
+}
+
+function planMoveControls(project: ProjectDocument, prompt: string): GuidedAgentPlan | null {
+  const moveAction = findMoveInputAction(project);
+  const reset = /\b(reset|restore)\b.*\bmove controls?\b/i.test(prompt);
+  const useIjkl = /\b(set|change|remap)\b.*\bmove controls?\b.*\bijkl\b/i.test(prompt);
+  if (!reset && !useIjkl) return null;
+  if (!moveAction) return unsupported('This project does not have a named Move Input Action to remap.');
+
+  if (reset) {
+    const defaults = createDefaultMoveInputAction();
+    return {
+      ok: true,
+      kind: 'proposal',
+      title: 'Reset Move controls',
+      description: 'Restore Move to the novice-safe WASD and arrow-key bindings as one undoable project edit.',
+      calls: [{
+        name: 'studio_upsert_input_action',
+        arguments: {
+          actionId: moveAction.id,
+          bindings: defaults.bindings.map(({ code, axis, scale }) => ({ code, axis, scale })),
+        },
+      }],
+      errors: [],
+    };
+  }
+
+  const bindingFor = (axis: 'x' | 'y', scale: -1 | 1, code: string) => {
+    const existing = moveAction.bindings.find((binding) => binding.axis === axis && binding.scale === scale && binding.code.startsWith('Key'))
+      ?? moveAction.bindings.find((binding) => binding.axis === axis && binding.scale === scale);
+    return { ...(existing ? { id: existing.id } : {}), code, axis, scale };
+  };
+  return {
+    ok: true,
+    kind: 'proposal',
+    title: 'Set Move controls to IJKL',
+    description: 'Replace the Move action bindings with I/J/K/L as one undoable project edit.',
+    calls: [{
+      name: 'studio_upsert_input_action',
+      arguments: {
+        actionId: moveAction.id,
+        bindings: [
+          bindingFor('x', -1, 'KeyJ'),
+          bindingFor('x', 1, 'KeyL'),
+          bindingFor('y', 1, 'KeyI'),
+          bindingFor('y', -1, 'KeyK'),
+        ],
+      },
+    }],
+    errors: [],
+  };
 }
 
 function parseJsonCalls(prompt: string): StudioAgentToolCall[] | null {
@@ -173,6 +235,9 @@ export function planGuidedAgentPrompt(project: ProjectDocument, selectedId: stri
     return { ok: true, kind: 'proposal', title: 'Create a new starter project', description: 'Replace the complete open project with the starter scene as one reversible editor transaction.', calls: [{ name: 'studio_reset_project', arguments: {} }], errors: [] };
   }
 
+  const moveControls = planMoveControls(project, cleanPrompt);
+  if (moveControls) return moveControls;
+
   const creation = createPlan(project, cleanPrompt);
   if (creation) return creation;
 
@@ -231,7 +296,7 @@ export function planGuidedAgentPrompt(project: ProjectDocument, selectedId: stri
     return { ok: true, kind: 'proposal', title: `Update ${target.name}`, description: 'Apply the requested editor state as one undoable change.', calls: [{ name: 'studio_update_node', arguments: argumentsValue }], errors: [] };
   }
 
-  return unsupported('The Guided Assistant currently understands scene summaries, starter-project reset, object creation, transforms, materials, behaviors, visibility, duplication, deletion, and world backgrounds. A model-backed provider will use the same broader capability manifest.');
+  return unsupported('The Guided Assistant currently understands scene summaries, starter-project reset, named Move control remapping, object creation, transforms, materials, behaviors, visibility, duplication, deletion, and world backgrounds. A model-backed provider will use the same broader capability manifest.');
 }
 
 export function executeAgentToolBatch(project: ProjectDocument, calls: StudioAgentToolCall[]): StudioAgentBatchResult {

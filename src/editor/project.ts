@@ -2,6 +2,8 @@ import type {
   Axis,
   CameraData,
   GameplayComponent,
+  InputAction,
+  KeyboardInputBinding,
   LightData,
   MaterialData,
   ModelAssetDiagnostics,
@@ -12,6 +14,7 @@ import type {
   StudioAsset,
   TransformData,
 } from './types';
+import { DEFAULT_MOVE_ACTION_ID, KEYBOARD_CODE_PATTERN, createDefaultInputActions } from './inputActions';
 
 const transform = (
   position: TransformData['position'] = [0, 0, 0],
@@ -46,7 +49,7 @@ export function createGameplayComponent(type: GameplayComponent['type']): Gamepl
     return { id: createComponentId(type), type, enabled: true, speed: 1, distance: 0.25, axis: 'y', phase: 0 };
   }
   if (type === 'keyboardMove') {
-    return { id: createComponentId(type), type, enabled: true, speed: 3.5, plane: 'xz' };
+    return { id: createComponentId(type), type, enabled: true, speed: 3.5, plane: 'xz', actionId: DEFAULT_MOVE_ACTION_ID };
   }
   return { id: createComponentId(type), type, enabled: true, speed: 0.8, axis: 'y' };
 }
@@ -67,7 +70,7 @@ export const BUILT_IN_ASSETS: StudioAsset[] = [
 
 export function createStarterProject(): ProjectDocument {
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     id: createProjectId(),
     name: 'Starter Project',
     sceneName: 'MainWorld',
@@ -84,6 +87,7 @@ export function createStarterProject(): ProjectDocument {
       shadows: true,
     },
     assets: [],
+    inputActions: createDefaultInputActions(),
     nodes: [
       {
         id: 'scene-root',
@@ -183,7 +187,7 @@ export function createStarterProject(): ProjectDocument {
         locked: false,
         transform: transform([0, 1.55, 0]),
         components: [
-          { id: 'player-move', type: 'keyboardMove', enabled: true, speed: 3.5, plane: 'xz' },
+          { id: 'player-move', type: 'keyboardMove', enabled: true, speed: 3.5, plane: 'xz', actionId: DEFAULT_MOVE_ACTION_ID },
         ],
       },
       {
@@ -448,6 +452,7 @@ export type LoadProjectDocumentResult =
 const nodeKinds = ['group', 'mesh', 'model', 'light', 'camera'] as const;
 const primitives = ['box', 'sphere', 'capsule', 'cylinder', 'cone', 'plane', 'torus'] as const;
 const axes = ['x', 'y', 'z'] as const;
+const stableIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 const isRecord = (value: unknown): value is UnknownRecord => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 
@@ -621,6 +626,53 @@ function normalizeModelInstance(value: unknown, path: string, errors: string[]):
   };
 }
 
+function normalizeInputAction(
+  value: unknown,
+  path: string,
+  errors: string[],
+  usedBindingIds: Set<string>,
+): InputAction | null {
+  if (!isRecord(value)) {
+    errors.push(`${path} must be an object.`);
+    return null;
+  }
+  const id = stringAt(value, 'id', `${path}.id`, errors);
+  if (!stableIdPattern.test(id)) errors.push(`${path}.id must be a non-empty stable identifier.`);
+  const name = stringAt(value, 'name', `${path}.name`, errors);
+  if (!name.trim()) errors.push(`${path}.name must not be empty.`);
+  if (value.type !== 'axis2d') errors.push(`${path}.type must be "axis2d".`);
+
+  const bindingsValue = value.bindings;
+  if (!Array.isArray(bindingsValue)) errors.push(`${path}.bindings must be an array.`);
+  const usedCodes = new Set<string>();
+  const bindings: KeyboardInputBinding[] = (Array.isArray(bindingsValue) ? bindingsValue : []).flatMap((entry, index) => {
+    const bindingPath = `${path}.bindings[${index}]`;
+    if (!isRecord(entry)) {
+      errors.push(`${bindingPath} must be an object.`);
+      return [];
+    }
+    const bindingId = stringAt(entry, 'id', `${bindingPath}.id`, errors);
+    if (!stableIdPattern.test(bindingId)) errors.push(`${bindingPath}.id must be a non-empty stable identifier.`);
+    if (usedBindingIds.has(bindingId)) errors.push(`${bindingPath}.id duplicates binding id "${bindingId}".`);
+    usedBindingIds.add(bindingId);
+    const code = stringAt(entry, 'code', `${bindingPath}.code`, errors);
+    if (!KEYBOARD_CODE_PATTERN.test(code)) errors.push(`${bindingPath}.code must be a supported KeyboardEvent.code identifier.`);
+    if (usedCodes.has(code)) errors.push(`${bindingPath}.code duplicates keyboard binding "${code}" in this action.`);
+    usedCodes.add(code);
+    const axis = entry.axis;
+    if (axis !== 'x' && axis !== 'y') errors.push(`${bindingPath}.axis must be "x" or "y".`);
+    const scale = entry.scale;
+    if (scale !== -1 && scale !== 1) errors.push(`${bindingPath}.scale must be -1 or 1.`);
+    return [{
+      id: bindingId,
+      code,
+      axis: axis === 'y' ? 'y' : 'x',
+      scale: scale === -1 ? -1 : 1,
+    }];
+  });
+  return { id, name, type: 'axis2d', bindings };
+}
+
 function normalizeComponent(
   value: unknown,
   path: string,
@@ -649,7 +701,9 @@ function normalizeComponent(
   if (type === 'keyboardMove') {
     const plane = value.plane;
     if (plane !== 'xz' && plane !== 'xy') errors.push(`${path}.plane must be "xz" or "xy".`);
-    return { id, type, enabled, speed, plane: plane === 'xy' ? 'xy' : 'xz' };
+    const actionId = stringAt(value, 'actionId', `${path}.actionId`, errors);
+    if (!stableIdPattern.test(actionId)) errors.push(`${path}.actionId must be a non-empty stable identifier.`);
+    return { id, type, enabled, speed, plane: plane === 'xy' ? 'xy' : 'xz', actionId };
   }
   const axisValue = value.axis;
   if (!axes.includes(axisValue as Axis)) errors.push(`${path}.axis must be "x", "y", or "z".`);
@@ -719,19 +773,41 @@ function migrateVersionTwo(value: UnknownRecord, warnings: string[]): UnknownRec
   return migrated;
 }
 
+function migrateVersionThree(value: UnknownRecord, warnings: string[]): UnknownRecord {
+  const migrated = structuredClone(value) as UnknownRecord;
+  migrated.schemaVersion = 4;
+  migrated.inputActions = createDefaultInputActions();
+  if (Array.isArray(migrated.nodes)) {
+    migrated.nodes = migrated.nodes.map((entry) => {
+      if (!isRecord(entry) || !Array.isArray(entry.components)) return entry;
+      return {
+        ...entry,
+        components: entry.components.map((component) => (
+          isRecord(component) && component.type === 'keyboardMove'
+            ? { ...component, actionId: DEFAULT_MOVE_ACTION_ID }
+            : component
+        )),
+      };
+    });
+  }
+  warnings.push('Migrated project schema from v3 to v4 and mapped keyboard movement to the default player.move input action.');
+  return migrated;
+}
+
 export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
   if (!isRecord(value)) return { ok: false, errors: ['Project must be a JSON object.'] };
-  if (typeof value.schemaVersion === 'number' && value.schemaVersion > 3) {
+  if (typeof value.schemaVersion === 'number' && value.schemaVersion > 4) {
     return { ok: false, errors: [`Project schema v${value.schemaVersion} is newer than this editor supports.`] };
   }
-  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3) {
-    return { ok: false, errors: ['schemaVersion must be 1, 2, or 3.'] };
+  if (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4) {
+    return { ok: false, errors: ['schemaVersion must be 1, 2, 3, or 4.'] };
   }
 
   const warnings: string[] = [];
   let source = structuredClone(value) as UnknownRecord;
   if (source.schemaVersion === 1) source = migrateVersionOne(source, warnings);
   if (source.schemaVersion === 2) source = migrateVersionTwo(source, warnings);
+  if (source.schemaVersion === 3) source = migrateVersionThree(source, warnings);
   const errors: string[] = [];
   const settingsValue = source.settings;
   if (!isRecord(settingsValue)) errors.push('settings must be an object.');
@@ -769,6 +845,22 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
     if (usedAssetIds.has(asset.id)) errors.push(`assets[${index}].id duplicates asset id "${asset.id}".`);
     usedAssetIds.add(asset.id);
     return [asset];
+  });
+
+  const inputActionsValue = source.inputActions;
+  if (!Array.isArray(inputActionsValue)) errors.push('inputActions must be an array.');
+  const usedInputActionIds = new Set<string>();
+  const usedInputActionNames = new Set<string>();
+  const usedBindingIds = new Set<string>();
+  const inputActions: InputAction[] = (Array.isArray(inputActionsValue) ? inputActionsValue : []).flatMap((entry, index) => {
+    const action = normalizeInputAction(entry, `inputActions[${index}]`, errors, usedBindingIds);
+    if (!action) return [];
+    if (usedInputActionIds.has(action.id)) errors.push(`inputActions[${index}].id duplicates input action id "${action.id}".`);
+    usedInputActionIds.add(action.id);
+    const normalizedName = action.name.trim().toLowerCase();
+    if (usedInputActionNames.has(normalizedName)) errors.push(`inputActions[${index}].name duplicates input action name "${action.name.trim()}".`);
+    usedInputActionNames.add(normalizedName);
+    return [action];
   });
 
   const nodesValue = source.nodes;
@@ -831,6 +923,11 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
     if (node.kind === 'model' && node.model && !usedAssetIds.has(node.model.assetId)) {
       errors.push(`nodes[${index}].model.assetId references missing asset "${node.model.assetId}".`);
     }
+    for (const [componentIndex, component] of node.components.entries()) {
+      if (component.type === 'keyboardMove' && !usedInputActionIds.has(component.actionId)) {
+        errors.push(`nodes[${index}].components[${componentIndex}].actionId references missing input action "${component.actionId}".`);
+      }
+    }
   }
   const nodesById = new Map(nodes.map((node) => [node.id, node]));
   for (const [index, node] of nodes.entries()) {
@@ -857,20 +954,21 @@ export function loadProjectDocument(value: unknown): LoadProjectDocumentResult {
     ok: true,
     warnings,
     project: {
-      schemaVersion: 3,
+      schemaVersion: 4,
       id,
       name,
       sceneName,
       updatedAt,
       settings,
       assets,
+      inputActions,
       nodes,
     },
   };
 }
 
 export function isProjectDocument(value: unknown): value is ProjectDocument {
-  if (!isRecord(value) || value.schemaVersion !== 3 || !Array.isArray(value.assets) || !Array.isArray(value.nodes) || !isRecord(value.settings)) return false;
+  if (!isRecord(value) || value.schemaVersion !== 4 || !Array.isArray(value.assets) || !Array.isArray(value.inputActions) || !Array.isArray(value.nodes) || !isRecord(value.settings)) return false;
   const result = loadProjectDocument(value);
   return (
     typeof value.name === 'string' &&
@@ -907,7 +1005,7 @@ export function buildRuntimeHtml(project: ProjectDocument, embeddedAssets: Recor
 </head>
 <body>
   <div class="badge"><b>THREEJS</b> GAME STUDIO · ${project.sceneName.replaceAll('<', '&lt;')}</div>
-  <div class="hint">Drag to orbit · Scroll to zoom · WASD / arrows move</div>
+  <div class="hint">Drag to orbit · Scroll to zoom · Configured input actions move</div>
   <script type="module">
     import * as THREE from 'three';
     import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -974,10 +1072,14 @@ export function buildRuntimeHtml(project: ProjectDocument, embeddedAssets: Recor
       camera.updateMatrixWorld(true);
       const controls=new OrbitControls(camera,renderer.domElement);controls.enableDamping=true;controls.target.set(0,1.2,0);
       const clock=new THREE.Clock();
-      const keys=new Set();const moveKeys=new Set(['w','a','s','d','arrowup','arrowdown','arrowleft','arrowright']);
-      addEventListener('keydown',event=>{const key=event.key.toLowerCase();if(moveKeys.has(key)){keys.add(key);event.preventDefault()}});
-      addEventListener('keyup',event=>keys.delete(event.key.toLowerCase()));addEventListener('blur',()=>keys.clear());
-      function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const node=root.userData.node;const move=root.userData.move;for(const component of node.components){if(!component.enabled||component.type!=='keyboardMove')continue;let horizontal=(keys.has('d')||keys.has('arrowright')?1:0)-(keys.has('a')||keys.has('arrowleft')?1:0);let vertical=(keys.has('w')||keys.has('arrowup')?1:0)-(keys.has('s')||keys.has('arrowdown')?1:0);const length=Math.hypot(horizontal,vertical)||1;horizontal/=length;vertical/=length;move[0]+=horizontal*component.speed*dt;if(component.plane==='xy')move[1]+=vertical*component.speed*dt;else move[2]-=vertical*component.speed*dt}root.position.fromArray(node.transform.position);root.position.x+=move[0];root.position.y+=move[1];root.position.z+=move[2];root.rotation.fromArray([...node.transform.rotation,'XYZ']);root.scale.fromArray(node.transform.scale);for(const component of node.components){if(!component.enabled)continue;if(component.type==='rotate')root.rotation[component.axis]+=t*component.speed;else if(component.type==='float')root.position[component.axis]+=Math.sin(t*component.speed*2+component.phase)*component.distance}}controls.update();renderer.render(scene,camera)}
+      const pressedCodes=new Set();const inputCodes=new Set(project.inputActions.flatMap(action=>action.bindings.map(binding=>binding.code)));
+      const clearInput=()=>pressedCodes.clear();
+      const resolveAction=actionId=>{const action=project.inputActions.find(candidate=>candidate.id===actionId);if(!action)return[0,0];let x=0,y=0;for(const binding of action.bindings){if(!pressedCodes.has(binding.code))continue;if(binding.axis==='x')x+=binding.scale;else y+=binding.scale}x=Math.max(-1,Math.min(1,x));y=Math.max(-1,Math.min(1,y));const length=Math.hypot(x,y);return length>1?[x/length,y/length]:[x,y]};
+      const isShortcutChord=event=>(event.metaKey&&event.code!=='MetaLeft'&&event.code!=='MetaRight')||(event.ctrlKey&&event.code!=='ControlLeft'&&event.code!=='ControlRight')||(event.altKey&&event.code!=='AltLeft'&&event.code!=='AltRight');
+      addEventListener('keydown',event=>{if(isShortcutChord(event))return;if(inputCodes.has(event.code)){pressedCodes.add(event.code);event.preventDefault()}});
+      addEventListener('keyup',event=>pressedCodes.delete(event.code));addEventListener('blur',clearInput);document.addEventListener('visibilitychange',()=>{if(document.hidden)clearInput()});
+      globalThis.__THREE_GAME_RUNTIME_DIAGNOSTICS__={schemaVersion:project.schemaVersion,getNodePosition:id=>objects.get(id)?.position.toArray()??null,getPressedCodes:()=>[...pressedCodes],resolveAction:actionId=>resolveAction(actionId)};
+      function frame(){requestAnimationFrame(frame);const dt=Math.min(clock.getDelta(),.05);const t=clock.elapsedTime;for(const root of objects.values()){const node=root.userData.node;const move=root.userData.move;for(const component of node.components){if(!component.enabled||component.type!=='keyboardMove')continue;const[horizontal,vertical]=resolveAction(component.actionId);move[0]+=horizontal*component.speed*dt;if(component.plane==='xy')move[1]+=vertical*component.speed*dt;else move[2]-=vertical*component.speed*dt}root.position.fromArray(node.transform.position);root.position.x+=move[0];root.position.y+=move[1];root.position.z+=move[2];root.rotation.fromArray([...node.transform.rotation,'XYZ']);root.scale.fromArray(node.transform.scale);for(const component of node.components){if(!component.enabled)continue;if(component.type==='rotate')root.rotation[component.axis]+=t*component.speed;else if(component.type==='float')root.position[component.axis]+=Math.sin(t*component.speed*2+component.phase)*component.distance}}controls.update();renderer.render(scene,camera)}
       addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});frame();
     }
     boot().catch(error=>{document.querySelector('.badge').textContent='Build could not start · '+error.message;console.error(error)});
