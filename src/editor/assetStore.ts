@@ -1,5 +1,5 @@
 import type { StoredModelSource } from './modelAssets';
-import type { ProjectDocument } from './types';
+import type { ProjectDocument, ProjectDocumentV5 } from './types';
 
 export const ASSET_DB_NAME = 'threejs-studio-assets';
 export const LEGACY_ASSET_DB_NAME = 'threejs-game-studio-assets';
@@ -28,6 +28,13 @@ export interface PortableProjectBundle {
   format: typeof PORTABLE_PROJECT_FORMAT;
   bundleVersion: 1;
   project: ProjectDocument;
+  assetSources: PortableAssetSource[];
+}
+
+export interface PortableGameProjectBundle {
+  format: typeof PORTABLE_PROJECT_FORMAT;
+  bundleVersion: 2;
+  project: ProjectDocumentV5;
   assetSources: PortableAssetSource[];
 }
 
@@ -210,6 +217,39 @@ export async function createPortableProjectBundle(project: ProjectDocument): Pro
   };
 }
 
+export async function createPortableGameProjectBundle(project: ProjectDocumentV5): Promise<{
+  bundle: PortableGameProjectBundle;
+  missingAssetIds: string[];
+}> {
+  const assetSources: PortableAssetSource[] = [];
+  const missingAssetIds: string[] = [];
+  for (const asset of project.assets) {
+    if (asset.kind !== 'model') continue;
+    const source = await getModelAssetSource(project.id, asset.id, asset.revision);
+    if (!source) {
+      missingAssetIds.push(asset.id);
+      continue;
+    }
+    assetSources.push({
+      assetId: asset.id,
+      revision: asset.revision,
+      fileName: source.fileName,
+      mimeType: source.mimeType,
+      byteLength: source.byteLength,
+      base64: bytesToBase64(source.bytes),
+    });
+  }
+  return {
+    bundle: {
+      format: PORTABLE_PROJECT_FORMAT,
+      bundleVersion: 2,
+      project,
+      assetSources,
+    },
+    missingAssetIds,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -234,6 +274,41 @@ export function readPortableProjectBundle(value: unknown): {
     const bytes = base64ToBytes(entry.base64);
     if (typeof entry.byteLength !== 'number' || entry.byteLength !== bytes.byteLength) {
       throw new Error(`Project package assetSources[${index}].byteLength does not match its data.`);
+    }
+    return {
+      assetId: entry.assetId,
+      revision: entry.revision,
+      source: {
+        fileName: entry.fileName,
+        mimeType: entry.mimeType,
+        byteLength: bytes.byteLength,
+        bytes,
+      },
+    };
+  });
+  return { project: value.project, sources };
+}
+
+export function readPortableGameProjectBundle(value: unknown): {
+  project: unknown;
+  sources: Array<{ assetId: string; revision: number; source: StoredModelSource }>;
+} | null {
+  if (
+    !isRecord(value) ||
+    value.format !== PORTABLE_PROJECT_FORMAT ||
+    value.bundleVersion !== 2
+  ) return null;
+  if (!Array.isArray(value.assetSources)) throw new Error('Game project package assetSources must be an array.');
+  const sources = value.assetSources.map((entry, index) => {
+    if (!isRecord(entry)) throw new Error(`Game project package assetSources[${index}] must be an object.`);
+    if (typeof entry.assetId !== 'string' || !entry.assetId) throw new Error(`Game project package assetSources[${index}].assetId is invalid.`);
+    if (typeof entry.revision !== 'number' || !Number.isInteger(entry.revision) || entry.revision < 1) throw new Error(`Game project package assetSources[${index}].revision is invalid.`);
+    if (typeof entry.fileName !== 'string' || !entry.fileName) throw new Error(`Game project package assetSources[${index}].fileName is invalid.`);
+    if (typeof entry.mimeType !== 'string') throw new Error(`Game project package assetSources[${index}].mimeType is invalid.`);
+    if (typeof entry.base64 !== 'string') throw new Error(`Game project package assetSources[${index}].base64 is invalid.`);
+    const bytes = base64ToBytes(entry.base64);
+    if (typeof entry.byteLength !== 'number' || entry.byteLength !== bytes.byteLength) {
+      throw new Error(`Game project package assetSources[${index}].byteLength does not match its data.`);
     }
     return {
       assetId: entry.assetId,

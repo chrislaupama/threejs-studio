@@ -3,6 +3,14 @@ import { expect, test, type Page } from '@playwright/test';
 type StudioProjectSnapshot = {
   revision: number;
   project: {
+    schemaVersion: 5;
+    id: string;
+    entities: Array<{
+      id: string;
+      name: string;
+    }>;
+  };
+  legacySceneProjection: {
     id: string;
     inputActions: Array<{
       id: string;
@@ -28,7 +36,7 @@ type StudioCapabilityManifest = {
 };
 
 type StudioAgentBridge = {
-  apiVersion: 1;
+  apiVersion: 2;
   manifest: () => StudioCapabilityManifest | Promise<StudioCapabilityManifest>;
   snapshot: () => StudioProjectSnapshot | Promise<StudioProjectSnapshot>;
   request: (request: {
@@ -53,7 +61,7 @@ async function openFresh(page: Page) {
   });
   await page.reload();
   await page.waitForFunction(() => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.frame ?? 0) > 10);
-  await page.waitForFunction(() => (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__?.apiVersion === 1);
+  await page.waitForFunction(() => (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__?.apiVersion === 2);
 }
 
 async function snapshot(page: Page): Promise<StudioProjectSnapshot> {
@@ -81,8 +89,8 @@ test('Assistant proposal does not mutate until approval, applies atomically, and
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await openFresh(page);
   const before = await snapshot(page);
-  expect(before.project.nodes).toHaveLength(13);
-  expect(before.project.nodes.some((node) => node.name === 'Enemy')).toBe(false);
+  expect(before.legacySceneProjection.nodes).toHaveLength(13);
+  expect(before.legacySceneProjection.nodes.some((node) => node.name === 'Enemy')).toBe(false);
 
   await openAssistant(page);
   await expect(page.getByTestId('assistant-panel')).toBeFocused();
@@ -104,7 +112,7 @@ test('Assistant proposal does not mutate until approval, applies atomically, and
 
   const proposed = await snapshot(page);
   expect(proposed.revision).toBe(before.revision);
-  expect(proposed.project.nodes).toEqual(before.project.nodes);
+  expect(proposed.legacySceneProjection.nodes).toEqual(before.legacySceneProjection.nodes);
   await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
 
   await page.getByTestId('assistant-approve').click();
@@ -113,7 +121,7 @@ test('Assistant proposal does not mutate until approval, applies atomically, and
 
   const applied = await snapshot(page);
   expect(applied.revision).toBeGreaterThan(before.revision);
-  const enemy = applied.project.nodes.find((node) => node.name === 'Enemy');
+  const enemy = applied.legacySceneProjection.nodes.find((node) => node.name === 'Enemy');
   expect(enemy).toMatchObject({
     kind: 'mesh',
     transform: { position: [2, 0.2, 0] },
@@ -126,7 +134,7 @@ test('Assistant proposal does not mutate until approval, applies atomically, and
   await page.getByTestId('assistant-undo').click();
   await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount)).toBe(13);
   const undone = await snapshot(page);
-  expect(undone.project.nodes.some((node) => node.name === 'Enemy')).toBe(false);
+  expect(undone.legacySceneProjection.nodes.some((node) => node.name === 'Enemy')).toBe(false);
   expect(undone.revision).toBeGreaterThan(applied.revision);
   await page.getByRole('button', { name: 'Close Studio Assistant' }).focus();
   await page.keyboard.press('Escape');
@@ -142,7 +150,7 @@ test('prompt editing keeps native undo isolated from project history', async ({ 
   await page.getByTestId('add-object').click();
   await page.getByTestId('create-box').click();
   const afterEdit = await snapshot(page);
-  expect(afterEdit.project.nodes).toHaveLength(14);
+  expect(afterEdit.legacySceneProjection.nodes).toHaveLength(14);
 
   await openAssistant(page);
   const input = page.getByTestId('assistant-input');
@@ -151,14 +159,14 @@ test('prompt editing keeps native undo isolated from project history', async ({ 
 
   const afterPromptUndo = await snapshot(page);
   expect(afterPromptUndo.revision).toBe(afterEdit.revision);
-  expect(afterPromptUndo.project.nodes).toHaveLength(14);
+  expect(afterPromptUndo.legacySceneProjection.nodes).toHaveLength(14);
 });
 
 test('Guided Assistant remaps and resets the named Move Input Action through review and Undo', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'Named Input Action proposal parity only needs one browser pass.');
   await openFresh(page);
   const before = await snapshot(page);
-  const originalMove = before.project.inputActions.find((action) => action.id === 'player.move');
+  const originalMove = before.legacySceneProjection.inputActions.find((action) => action.id === 'player.move');
   expect(originalMove?.bindings.map((binding) => binding.code)).toEqual([
     'KeyA', 'KeyD', 'KeyW', 'KeyS', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
   ]);
@@ -176,11 +184,11 @@ test('Guided Assistant remaps and resets the named Move Input Action through rev
   await expect(proposal).toContainText('KeyL');
 
   const proposed = await snapshot(page);
-  expect(proposed.project.inputActions).toEqual(before.project.inputActions);
+  expect(proposed.legacySceneProjection.inputActions).toEqual(before.legacySceneProjection.inputActions);
   await page.getByTestId('assistant-approve').click();
   await expect(proposal).toBeHidden();
   const remapped = await snapshot(page);
-  expect(remapped.project.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
+  expect(remapped.legacySceneProjection.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
     'KeyJ', 'KeyL', 'KeyI', 'KeyK',
   ]);
 
@@ -191,13 +199,13 @@ test('Guided Assistant remaps and resets the named Move Input Action through rev
   await page.getByTestId('assistant-approve').click();
   await expect(proposal).toBeHidden();
   const reset = await snapshot(page);
-  expect(reset.project.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
+  expect(reset.legacySceneProjection.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
     'KeyA', 'KeyD', 'KeyW', 'KeyS', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
   ]);
 
   await page.getByTestId('assistant-undo').click();
   const undoneReset = await snapshot(page);
-  expect(undoneReset.project.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
+  expect(undoneReset.legacySceneProjection.inputActions.find((action) => action.id === 'player.move')?.bindings.map((binding) => binding.code)).toEqual([
     'KeyJ', 'KeyL', 'KeyI', 'KeyK',
   ]);
 });
@@ -255,7 +263,7 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   });
 
   expect(contract).toMatchObject({
-    apiVersion: 1,
+    apiVersion: 2,
     legacyAlias: true,
     diagnosticsAlias: true,
     methods: {
@@ -279,7 +287,11 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
     },
     current: {
       revision: expect.any(Number),
-      project: { nodes: expect.any(Array) },
+      project: {
+        schemaVersion: 5,
+        entities: expect.any(Array),
+      },
+      legacySceneProjection: { nodes: expect.any(Array) },
     },
   });
 
@@ -343,8 +355,8 @@ test('browser bridge exposes manifest and snapshot while routing mutations throu
   await expect(proposal).toBeHidden();
   const afterDismiss = await snapshot(page);
   expect(afterDismiss.revision).toBeGreaterThan(contract.current.revision);
-  expect(afterDismiss.project.nodes.some((node) => node.name === 'Bridge Probe')).toBe(false);
-  expect(afterDismiss.project.nodes).toHaveLength(14);
+  expect(afterDismiss.legacySceneProjection.nodes.some((node) => node.name === 'Bridge Probe')).toBe(false);
+  expect(afterDismiss.legacySceneProjection.nodes).toHaveLength(14);
 
   // A host action may remain async after Apply. Its proposal stays reserved,
   // Discard is disabled, and a new caller cannot orphan the in-flight review.
@@ -426,7 +438,7 @@ test('browser bridge covers Input Action reads, reference guards, sensitive reas
   await page.getByTestId('assistant-approve').click();
   await expect(page.getByTestId('assistant-proposal')).toBeHidden();
   const created = await snapshot(page);
-  const alternate = created.project.inputActions.find((action) => action.name === 'Bridge Move');
+  const alternate = created.legacySceneProjection.inputActions.find((action) => action.name === 'Bridge Move');
   expect(alternate).toBeTruthy();
   if (!alternate) throw new Error('Bridge-created Input Action is missing.');
 
@@ -441,12 +453,12 @@ test('browser bridge covers Input Action reads, reference guards, sensitive reas
   await expect(proposal.locator('.agent-call-review-note')).toContainText('reassigns Player Rig controls');
   await page.getByTestId('assistant-approve').click();
   await expect(proposal).toBeHidden();
-  expect((await snapshot(page)).project.nodes.find((node) => node.id === 'player-rig')?.components).toContainEqual(
+  expect((await snapshot(page)).legacySceneProjection.nodes.find((node) => node.id === 'player-rig')?.components).toContainEqual(
     expect.objectContaining({ id: 'player-move', actionId: alternate.id }),
   );
 
   await page.getByTestId('assistant-undo').click();
-  expect((await snapshot(page)).project.nodes.find((node) => node.id === 'player-rig')?.components).toContainEqual(
+  expect((await snapshot(page)).legacySceneProjection.nodes.find((node) => node.id === 'player-rig')?.components).toContainEqual(
     expect.objectContaining({ id: 'player-move', actionId: 'player.move' }),
   );
 
@@ -454,16 +466,28 @@ test('browser bridge covers Input Action reads, reference guards, sensitive reas
   expect(deleteResult).toMatchObject({ status: 'approval_required', requestId: 'qa-delete-input-action' });
   await page.getByTestId('assistant-approve').click();
   await expect(proposal).toBeHidden();
-  expect((await snapshot(page)).project.inputActions.some((action) => action.id === alternate.id)).toBe(false);
+  expect((await snapshot(page)).legacySceneProjection.inputActions.some((action) => action.id === alternate.id)).toBe(false);
 
   await page.getByTestId('assistant-undo').click();
-  expect((await snapshot(page)).project.inputActions.some((action) => action.id === alternate.id)).toBe(true);
+  expect((await snapshot(page)).legacySceneProjection.inputActions.some((action) => action.id === alternate.id)).toBe(true);
 });
 
 test('browser bridge routes runtime lifecycle and full project reset through explicit approval', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'Representative editor-host execution only needs one browser pass.');
   await openFresh(page);
   const before = await snapshot(page);
+
+  await page.evaluate(() => {
+    const studioWindow = window as unknown as { __qaRuntimeAppliedModes?: string[] };
+    studioWindow.__qaRuntimeAppliedModes = [];
+    const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
+    if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
+    bridge.subscribe(async (event) => {
+      if ((event as { type?: string }).type !== 'proposal.applied') return;
+      const current = await bridge.snapshot() as unknown as { mode: string };
+      studioWindow.__qaRuntimeAppliedModes?.push(current.mode);
+    });
+  });
 
   const request = async (tool: string, argumentsValue: Record<string, unknown>, requestId: string) => page.evaluate(async ({ toolName, args, baseRevision, id }) => {
     const bridge = (window as unknown as { __THREEJS_STUDIO_AGENT__?: StudioAgentBridge }).__THREEJS_STUDIO_AGENT__;
@@ -477,6 +501,9 @@ test('browser bridge routes runtime lifecycle and full project reset through exp
   });
   await page.getByTestId('assistant-approve').click();
   await expect(page.getByTestId('studio-app')).toHaveAttribute('data-runtime', 'playing');
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __qaRuntimeAppliedModes?: string[] }
+  ).__qaRuntimeAppliedModes?.at(-1))).toBe('play');
   expect((await snapshot(page)).revision).toBe(before.revision);
 
   expect(await request('studio_control_runtime', { action: 'stop' }, 'qa-runtime-stop')).toMatchObject({
@@ -486,6 +513,19 @@ test('browser bridge routes runtime lifecycle and full project reset through exp
   await page.getByTestId('assistant-approve').click();
   await expect(page.getByTestId('studio-app')).toHaveAttribute('data-runtime', 'edit');
 
+  expect(await request('studio_control_runtime', { action: 'preview' }, 'qa-runtime-preview')).toMatchObject({
+    status: 'approval_required',
+    requestId: 'qa-runtime-preview',
+  });
+  await page.getByTestId('assistant-approve').click();
+  await expect(page.getByTestId('studio-app')).toHaveAttribute('data-runtime', 'playing');
+  await expect(page.locator('.preview-chrome')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => (
+    window as unknown as { __qaRuntimeAppliedModes?: string[] }
+  ).__qaRuntimeAppliedModes?.at(-1))).toBe('play');
+  await page.keyboard.press('Escape');
+  await expect(page.getByTestId('studio-app')).toHaveAttribute('data-runtime', 'edit');
+
   expect(await request('studio_reset_project', {}, 'qa-reset-project')).toMatchObject({
     status: 'approval_required',
     requestId: 'qa-reset-project',
@@ -493,11 +533,11 @@ test('browser bridge routes runtime lifecycle and full project reset through exp
   await page.getByTestId('assistant-approve').click();
   const reset = await snapshot(page);
   expect(reset.revision).toBeGreaterThan(before.revision);
-  expect(reset.project.nodes).toHaveLength(13);
-  expect(reset.project.id).not.toBe(before.project.id);
+  expect(reset.legacySceneProjection.nodes).toHaveLength(13);
+  expect(reset.legacySceneProjection.id).not.toBe(before.legacySceneProjection.id);
 
   await page.keyboard.press('Control+Z');
   const restored = await snapshot(page);
-  expect(restored.project.id).toBe(before.project.id);
+  expect(restored.legacySceneProjection.id).toBe(before.legacySceneProjection.id);
   expect(restored.revision).toBeGreaterThan(reset.revision);
 });

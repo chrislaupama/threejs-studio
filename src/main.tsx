@@ -1,7 +1,8 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
-import './styles.css';
+import { EditorUIProvider } from './components/studio/EditorUIProvider';
+import './globals.css';
 
 const root = document.getElementById('root');
 
@@ -9,6 +10,8 @@ if (!root) throw new Error('ThreeJS Studio root element is missing');
 
 createRoot(root).render(
   <StrictMode>
-    <App />
+    <EditorUIProvider>
+      <App />
+    </EditorUIProvider>
   </StrictMode>,
 );

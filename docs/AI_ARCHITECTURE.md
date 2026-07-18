@@ -1,234 +1,164 @@
 # ThreeJS Studio — AI Authoring Architecture
 
-## Status at a glance
+## Status and invariant
 
-ThreeJS Studio is being built as an AI-native editor, not as a human editor with screen automation added later. Human controls, the built-in assistant, and future external agents are expected to operate on the same serializable `ProjectDocument` through the same typed authoring capabilities.
+Human/AI authoring parity is a shipping requirement. A project feature is not complete when it exists only as a React callback, an Inspector control, or a direct Three.js mutation.
 
-The current milestone ships:
+`ProjectDocumentV5` is now the editor's authoritative durable document. The mounted scene editor still consumes a schema-v4 compatibility view, so the repository temporarily exposes three related capability layers:
 
-- A versioned authoring capability manifest with JSON-compatible argument schemas, declared scope metadata, read/write effects, risk levels, and approval policies.
-- Eighteen pure, validated project tools for inspection, full starter-project reset, and undoable scene, material, gameplay, named Input Action, world, light, camera, and existing-model-instance changes.
-- A local Guided Assistant that turns a deliberately limited set of plain-language requests or structured tool JSON into reviewable proposals. It is a deterministic planner, not a model-backed AI service.
-- A proposal surface that shows each planned call before any write is applied. Accepted pure project-tool plans validate atomically and enter the editor as one history step.
-- Fourteen browser-host definitions for editor-only capabilities such as selection, viewport controls, Play/Stop, history, console, layout, save/export/build, and user-mediated import requests.
-- A trusted same-page integration bridge at `window.__THREEJS_STUDIO_AGENT__` with API version 1. It exposes manifest discovery, a cloned project/editor snapshot, revision-checked tool requests, and event subscription without exposing React state, DOM nodes, or Three.js objects. The pre-rename `window.__THREE_GAME_STUDIO_AGENT__` name remains a deprecated alias so existing integrations do not break.
-- Contract tests for project-tool immutability, validation, capability metadata, hierarchy safety, contextual approvals, and representative authoring domains.
+1. The original editor capability manifest operates on the v4 scene view and is integrated with Guided Assistant and the trusted same-page bridge.
+2. `AGENT_ENGINE_CAPABILITY_MANIFEST` is a pure compatibility contract whose source type is v4. It tests the atomic v4 command executor and v4→v5 projection/build-readiness helpers; it is not evidence that v4 remains the durable document.
+3. `AGENT_GAME_CAPABILITY_MANIFEST` operates directly on validated v5 projects for scripts, the Collect & Escape template, and build profiles.
 
-The current milestone does **not** ship an MCP server, remote transport, cloud model, OpenAI API integration, or hidden provider credentials. Those consume the same contract in later phases.
+For every authorable feature:
 
-## Non-negotiable parity invariant
+1. Durable state belongs in `ProjectDocumentV5` or a stable asset/source reference.
+2. Human and agent entry points reuse the same pure project operation.
+3. Every tool declares an input schema, description, scope, effect, approval policy, and availability.
+4. Arguments are validated before execution and the complete project is validated after execution.
+5. Mutations use optimistic revisions and enter normal history, logging, autosave, and Undo.
+6. Multi-operation work is atomic; a failed plan applies nothing.
+7. Contract tests compare human and agent results and prove one-step Undo.
+8. Runtime and browser objects never cross the authoring boundary.
 
-Every authorable feature must be usable through both the human editor and the typed authoring-tool layer. A feature is not complete if it exists only as a React callback or a direct Three.js mutation.
+System-owned hashes, revisions, timestamps, import diagnostics, and generated IDs can be inspected but are changed only by their owning operation.
 
-For every new authorable field or action:
+## Trust boundaries
 
-1. Keep its durable state in `ProjectDocument` or in an explicitly referenced asset record. Do not hide authored game state in React, the DOM, or `Object3D.userData`.
-2. Add or extend a typed capability with an input schema, scope, effect, risk level, approval rule, and availability constraints.
-3. Reuse the same pure project operation in the human and agent paths.
-4. Validate arguments before execution and validate the complete resulting project before commit.
-5. Route successful mutations through normal editor history, logging, autosave, selection, and viewport reconciliation.
-6. Add contract coverage and a browser workflow proving that the result is visible and undoable.
-7. Update the capability matrix in this document.
-
-System-managed values such as stable IDs, timestamps, import diagnostics, hashes, and asset revisions remain readable but are changed only by their owning operation. AI access to every authorable area does not mean unrestricted writes to integrity metadata.
-
-This repository also carries the same rule in `AGENTS.md` so it remains an implementation constraint rather than a one-time design note.
-
-## Boundaries
-
-```text
-Human editor controls ─────────────┐
-                                   │
-Guided Assistant proposal UI ──────┼──> typed capability + policy layer
-                                   │                │
-Future model-backed provider ──────┤                ├──> validated ProjectDocument
-                                   │                │          │
-Future MCP adapter ────────────────┘                │          ├──> history / autosave
-                                                    │          └──> asset references
-Browser host capabilities <─────────────────────────┘
-          │
-          ├──> selection / viewport / runtime / layout
-          └──> explicit file picker / save / export / build
-
-ProjectDocument ──> ViewportEngine ──> derived Three.js objects
+```mermaid
+flowchart LR
+    H["Human shadcn/Base UI controls"] --> O["Pure project operation"]
+    G["Guided Assistant / future model adapter"] --> T["Typed capability policy"]
+    M["Future MCP adapter"] --> T
+    T --> O
+    O --> C["Revision + history/autosave commit"]
+    C --> D["ProjectDocumentV5"]
+    D --> L["Disposable legacy scene view"]
+    D --> R["Compiler/runtime inputs"]
+    B["Browser-host actions"] --> P["Visible approval boundary"]
+    P --> C
 ```
 
-The durable project model is the trust boundary:
+- Project APIs contain only finite, JSON-compatible data and stable references.
+- `Object3D`, renderer, canvas, DOM, React state, IndexedDB handles, `File`, object URLs, audio nodes, physics objects, and browser handles are never project-tool values.
+- Play uses derived runtime state. Runtime/save-game state cannot mutate authored data.
+- File selection, code changes/execution, permission changes, destructive operations, and external communication require visible human review.
+- Provider/model logic stays outside the editor core. The Guided Assistant, a future provider, and an MCP adapter should consume the same manifest/executor.
 
-- Tools accept and return JSON-compatible, serializable data.
-- Project tools work on clones and never mutate the caller's document.
-- `ViewportEngine` reconciles approved document state into Three.js; agents do not receive `Object3D`, renderer, material, texture, control, canvas, or animation-loop references.
-- Browser-host actions are explicit adapters around editor orchestration. They do not turn React setters into a public API.
-- Play mode remains mutation-locked. An agent must stop Play before changing authored data, just like a human.
+## Authoritative v5 document and compatibility scene view
 
-## Capability contract
+`src/App.tsx` stores the authoritative v5 project in `gameProjectRef`. Save/autosave, portable project packages, Undo/Redo snapshots, script authoring, builds, the bridge snapshot, and template creation use this document.
 
-The canonical capability protocol is `threejs-studio.authoring` version 1 over project schema v4. The manifest advertises `threejs-game-studio.authoring` as a compatibility protocol for integrations created before the ThreeJS Studio rename. It contains 32 tools: 18 pure project tools and 14 mounted-editor host tools. Tool names use the stable `studio_` namespace. Each definition advertises:
+`src/editor/gameProject.ts` provides the transition boundary:
 
-- Stable name, title, and description.
-- Domain and declared scopes.
-- Read-only versus mutating effect.
-- JSON-compatible input schema with unknown properties rejected.
-- Risk level: `read`, `low`, `moderate`, or `destructive`.
-- Approval policy: `none`, `when-sensitive`, or `required`.
-- Reversibility and a plain-language rationale.
-- Whether execution belongs to the pure project layer or browser host.
+- v1–v4 documents load through their strict loaders and migrate to v5.
+- v5 documents fail closed when malformed; they do not fall through to legacy migration.
+- `createLegacySceneView` derives the active scene for the existing Hierarchy, Inspector, and viewport.
+- `syncLegacySceneToV5` merges legacy scene edits back without discarding other scenes, non-model assets, prefabs, UI documents, or generalized bindings.
 
-Scope names in the current manifest describe the access a future authenticated host must grant; the in-page bridge does not authenticate callers or enforce scope grants. `project.write` is the explicit full-document lifecycle super-scope for reset, import, and history restoration, while narrower tools enumerate their read/write dependencies. The bridge assumes the JavaScript executing in the editor page is trusted. Mutations still cross the editor-owned proposal boundary, while permitted read-only calls return immediately. Authenticated identity and scope enforcement belong to the planned companion adapter.
+This adapter keeps existing controls working, but new v5 domains must not be flattened through the scene view.
 
-Representative pure project tools include:
+## Legacy editor capability layer
 
-- Project lifecycle and inspection: `studio_get_project_summary`, `studio_reset_project`, `studio_list_nodes`, `studio_get_node`, `studio_search_nodes`.
-- Scene: `studio_create_primitive`, `studio_create_group`, `studio_update_node`, `studio_duplicate_node`, `studio_delete_node`.
-- Gameplay: `studio_add_component`, `studio_update_component`, `studio_remove_component`.
-- Input: `studio_list_input_actions`, `studio_upsert_input_action`, `studio_delete_input_action`; Keyboard Move components reference named actions by stable `actionId`.
-- World: `studio_update_world_settings`.
-- Assets: `studio_add_model_instance` for an existing, trusted project asset.
+`AGENT_CAPABILITY_MANIFEST` publishes protocol `threejs-studio.authoring` version 1. Its pure tools cover scene inspection, primitives/groups, node updates and hierarchy, duplication/deletion, material/world changes, existing model instancing, Rotate/Float/Keyboard Move, and keyboard-first Input Actions. Browser-host tools cover selection, viewport/runtime controls, history, console, layout, save/import/export/build, and user-mediated file requests.
 
-The browser host extends the same namespace for editor context, diagnostics, selection, viewport state, runtime control, history, console, layout, save/export/build, and user-mediated project/model import requests. These actions are intentionally separate from pure project mutation because they depend on browser state or user activation.
+The deterministic Guided Assistant prepares typed calls for review, validates a pure plan, and commits an accepted plan as one Undo step. When these tools change the legacy scene view, the normal App commit path merges that change into authoritative v5.
 
-Unknown tools, unsupported properties, invalid type-specific fields, missing references, hierarchy cycles, root deletion, invalid fog ranges, and malformed transforms fail without partially changing the project.
+The global same-page bridge is intended for trusted code already running in the editor page. Its scope strings are descriptive metadata, not authenticated grants. It is neither a remote authorization boundary nor an MCP server.
+
+## V4 command compatibility contract
+
+`src/editor/projectCommands.ts` implements `threejs-studio.project-commands` version 1 for the existing schema-v4 scene domains. It provides strict serializable envelopes, optimistic revisions, cloned execution, pre/post validation, atomic batches, stable errors, affected records, bounded change paths, patches, and inverse snapshots.
+
+`AGENT_ENGINE_CAPABILITY_MANIFEST` wraps five pure compatibility tools around that executor and v5-readiness/build-profile projection. It is machine-marked `legacy-compatibility`, names v5 as the authoritative mounted schema, and points to `threejs-studio.game-authoring` as its successor. Its metadata intentionally declares source schema 4 and projection schema 5 because the function accepts a v4 scene document. In the mounted editor, that source is the disposable compatibility view—not the durable project.
+
+The v4 executor is not yet the universal App commit path, and it cannot author v5-only records. A v5-native command registry is still required for scenes, prefabs, generalized assets/input, scripts, variables/events, runtime UI, permissions, and build profiles.
+
+## V5 game capability layer
+
+`AGENT_GAME_CAPABILITY_MANIFEST` is machine-marked `authoritative` and publishes `threejs-studio.game-authoring` version 1 with seven tools:
+
+- `studio_list_scripts` and `studio_get_script`.
+- `studio_upsert_script` and `studio_delete_script`.
+- `studio_create_collect_escape`.
+- `studio_list_game_build_profiles`.
+- `studio_prepare_game_build`.
+
+Each call validates the complete v5 project, requires the observed revision, returns stable errors, and contains only serializable data. Mutations return the next project plus an inverse v5 snapshot and a single history label. `upsertProjectScript` is the same pure operation used by Monaco Save, and parity tests compare both routes.
+
+Executable-code writes, deletion, whole-project replacement, and artifact creation require approval. Build preparation itself is read-only and approval-free; it returns a descriptor whose later artifact-producing host action requires review. In the current same-page bridge, read-only and preparation tools complete immediately. Approval-required mutation tools create a serializable Assistant proposal, return `approval_required`, and can be applied through the visible proposal UI only while its base revision remains current. Apply commits the returned v5 project through normal validation, history, autosave, events, and one-step Undo. Human Monaco Save uses the same project operation behind a focused code-review dialog.
+
+The canonical bridge is API version 2. Its manifest reports schema 5 as authoritative and nests the game-authoring manifest. Its snapshot returns the v5 project as `project`, plus an explicitly named `legacySceneProjection` for consumers migrating from the former V1 snapshot shape. The version was incremented because changing `snapshot().project` from V4 to V5 is a breaking payload change.
 
 ## Capability matrix
 
-| Area | Inspect | Manipulate | Current route | Notes |
-| --- | --- | --- | --- | --- |
-| Project lifecycle, metadata, and totals | Yes | Limited | Project tools | Full starter reset is covered; project/scene rename should gain explicit tools before new UI is added. |
-| Scene hierarchy | Yes | Yes | Project tools | Create, rename, reparent, duplicate, delete, visibility, locks, and stable IDs. |
-| Transforms | Yes | Yes | Project tools | Position, Euler rotation, and scale; no direct `Object3D` access. |
-| Primitive materials | Yes | Yes | Project tools | Base/emissive color, intensity, metalness, roughness, and shadows. |
-| Gameplay components | Yes | Yes | Project tools | Add/update/remove Rotate, Float, and Keyboard Move by stable component ID; Keyboard Move can be reassigned by stable Input Action ID. |
-| Named Input Actions | Yes | Yes | Project tools | List/create/update complete action bindings by stable IDs without a human-only binding-count ceiling. Omitted IDs follow matching codes/directions, referenced remaps and component reassignment receive contextual review, and referenced actions cannot be deleted until reassigned. |
-| World/render settings | Yes | Yes | Project tools | Background, fog, exposure, grid, and realtime shadows. |
-| Lights and cameras | Yes | Yes | Project tools | Type-specific validated properties; sensitive framing/lighting edits carry approval metadata. |
-| Imported model metadata | Yes | Indirect | Project + browser host | Existing assets can be instanced and model nodes resized; source selection/relink remains user-mediated. |
-| Selection and viewport | Yes | Yes | Browser host | Select, frame, camera view, tool, grid, snapping, and view state without renderer exposure. |
-| Runtime and history | Yes | Yes | Browser host | Play/pause/resume/fixed-step/stop, clean Preview/exit, and undo/redo remain subject to editor mode rules. |
-| Console and layout | Yes | Yes | Browser host | Bounded console reads/clear and panel/experience controls. |
-| Save/export/build | Contextual | Yes | Browser host | Explicit host actions; downloads remain visible to the user. |
-| Project/model file selection | No path access | Request only | Browser host | An agent can request the picker; only the user chooses a file. |
-| Raw asset bytes | Metadata only | No | Planned staged transfer | Large binary data does not travel in ordinary tool JSON. |
-| Scripts, physics, audio, animation, UI canvas | Not yet | Not yet | Future registry entries | Their human and agent surfaces must ship together. |
+Status terms:
 
-## Proposal, approval, and commit flow
+- **Integrated** — available through the mounted editor and an appropriate typed route.
+- **Partial** — an integrated slice exists, but the full domain is not authorable end to end.
+- **Foundation** — a contract/module exists with focused tests but is not a complete product workflow.
+- **Gap** — no safe authoring route yet.
 
-The current built-in assistant follows a propose-then-apply workflow:
+| Domain | Human editor | Typed capability | Current status / next requirement |
+| --- | --- | --- | --- |
+| V5 load/save/history/packages | Yes | Bridge snapshot/read | Integrated durable format; legacy scene controls still use an adapter. |
+| Hierarchy, transforms, primitives, materials, world | Yes | Legacy tools + v4 commands | Integrated compatibility slice; port operations to v5-native commands. |
+| Rotate/Float/Keyboard Move | Yes | Legacy tools | Integrated legacy runtime slice; registry expansion remains. |
+| Keyboard Input Actions | Yes | Legacy tools | Integrated compatibility slice. |
+| General keyboard/pointer/touch/gamepad maps | Read-only summary; active in the v1 game runtime | No mutation tool | Partial; Collect-style runtime adapters consume them, but settings operations/forms/tools are missing. |
+| Imported model instancing | Yes | Existing trusted asset only | Integrated legacy slice; import/relink remains user-mediated. |
+| Multiple scenes and layers | Startup scene through legacy view | No v5 mutation tool | Foundation; schema/validation/preservation exist, editing and runtime transitions do not. |
+| Prefabs/overrides/variants | No | No | Schema foundation only. |
+| General asset union | Scripts integrated; models compatible | Script tools only | Partial; transactional importers/source revisions are still required. |
+| Script source | Monaco create/edit/save | List/read/upsert/delete | Integrated source-authoring slice with code approval and Undo; runtime execution/hot reload is not integrated. |
+| Variables/events/game state | Template data runs through the v1 adapter | No | Partial runtime slice; needs general operations, panels/tools, and script/graph orchestration. |
+| Physics | Collect-style manifest runs in Play/export | No | Partial Rapier slice; needs registry components, Inspector/debug authoring, tools, and a general shared runtime. |
+| Runtime game UI | Summary plus mounted Collect HUD in Play | No | Partial; the generic renderer runs in editor Play, while export uses a specialized HUD. Visual authoring and parity remain open. |
+| Build profiles/offline ZIP | List/build default profile | List/prepare | Partial; the ZIP runs the v1 Collect rules offline, but not arbitrary scripts/models or the same runtime implementation as Play. |
+| Permissions | No editor | No mutation tool | V5 default-deny schema only; add visible settings/approval operations. |
+| Editor selection/viewport/runtime/history | Yes | Legacy browser host | Integrated locally; host actions are not a general transactional batch API. |
+| Collect & Escape replacement | Menu/command and runnable adapter | Approval-gated v5 replacement | Authoring, Undo, and the manifest-driven core loop are integrated; script-driven shared-runtime acceptance is not. |
 
-1. The planner receives a cloned project snapshot, stable selected-node ID, and prompt.
-2. Read-only plans may run immediately and return structured summaries.
-3. Mutating plans become visible proposals listing their tool calls and effects.
-4. The user can discard or explicitly apply the proposal.
-5. A pure project-tool batch resolves intra-plan references, validates each operation against a working clone, and aborts the whole batch if any call fails.
-6. A successful changed project batch enters the normal editor commit path once, producing one Undo step.
+If a human control lands before its safe agent route, the gap and required approval/transport work must be recorded here before the feature is called complete.
 
-Project-tool writes and live editor-host actions are reviewed as separate transactions. Mutating editor-host actions are proposed one at a time because live browser/session state cannot yet be rolled back atomically.
+## Scripts and binary approvals
 
-The editor synchronously reserves one pending mutation proposal before returning `approval_required`. A concurrent mutation request is rejected until that proposal is applied or discarded, so every returned proposal ID continues to identify the visible review surface. Essentials shows exact changed values in plain language; Advanced also exposes validated structured arguments. Context-sensitive locked-node, root, hierarchy, camera, and light operations are elevated to the high-attention review treatment.
+Script source is serializable authored data, but saving or executing code is higher-risk than changing a transform. Script operations currently support list/read/upsert/delete and validate normalized virtual paths, source size, source/catalog revisions, and the complete project. Attach/detach, exposed properties, compile diagnostics, execution, and hot reload still need complete human and agent routes.
 
-All assistant-authored writes currently receive a visible review boundary, including changes whose capability metadata would permit a trusted host to run them without additional confirmation. Destructive calls such as subtree deletion always require explicit approval. Locked-node, scene-root, hierarchy, camera, and light changes can dynamically escalate a `when-sensitive` policy to `required`.
+Large binaries must not travel as ordinary base64 tool arguments. A future external-agent path should be staged:
 
-An agent never approves its own operation. File selection, external communication, destructive changes, and future irreversible operations must retain an editor-owned user boundary even if an external client claims it already asked permission.
+1. `prepare` declares filename, media type, byte length, digest, target, and intent.
+2. A trusted adapter returns a short-lived upload handle and limits.
+3. Bytes transfer out of band.
+4. The browser verifies size/digest and invokes the normal importer.
+5. `complete` atomically commits the source revision and project metadata.
+6. Abandoned stages expire and are garbage-collected.
 
-## Authoring revision and conflicts
+Raw filesystem paths, unrestricted directory reads, and silent relinks are not acceptable.
 
-Project schema version and authoring revision are different values. The browser host maintains a monotonic authoring revision for the open editing session. A proposal records the revision it was planned against and may apply only if that revision still matches. If a human, another proposal, Undo/Redo, import, or another authorized caller changes the project first, the stale proposal must be discarded and planned again.
+## Provider and MCP boundary
 
-External mutation envelopes must include:
+No provider key is bundled in client JavaScript, project files, prompts, logs, or local storage. A model-backed assistant needs a secure backend/token broker, OS secret store, local model, or external host that already owns credentials.
 
-- Target project/session identity.
-- `baseRevision`.
-- A client-generated `operationId` for retry deduplication.
-- Typed calls and an optional human-readable label.
-- A server-issued approval reference when required.
+A future local MCP adapter should begin with stdio or an explicitly paired loopback companion. It must enforce scopes, project/session identity, operation IDs, size/rate limits, cancellation, user approvals, and append-only audit events. A hosted adapter additionally requires authenticated HTTPS transport, resource-bound authorization, membership, durable revisions, object storage, and conflict policy.
 
-The current bridge returns a structured `revision_conflict` result with the current revision when `baseRevision` is stale; it must never silently overwrite intervening work. Pure project-tool transactions increment revision once after atomic commit. `updatedAt` is display/persistence metadata, not a concurrency token.
+Adding a model or transport must never create a more privileged mutation path than the human editor uses.
 
-The local milestone's in-browser revision guard is the beginning of this contract. Durable revision heads, operation deduplication, actor attribution, and an append-only event log are required before collaborative or remote mutation ships.
+## Required tests for every new capability
 
-## Browser bridge
+- Strict input and complete-project validation.
+- Stable errors, stale revision rejection, duplicate-operation handling, and atomic failure.
+- Human and agent operations produce the same v5 document.
+- One Undo step restores the original document.
+- A browser test proves the authored result is visible.
+- Approval boundaries cover files, code, permissions, destructive changes, and external communication.
+- Play/export support and this capability matrix are updated.
 
-The browser bridge is an integration seam for trusted same-page code and automated verification. It exposes cloned data and typed operations rather than UI internals:
+## Next convergence work
 
-```ts
-window.__THREEJS_STUDIO_AGENT__ = {
-  apiVersion: 1,
-  manifest(),
-  snapshot(),
-  request({ tool, arguments, baseRevision, requestId }),
-  subscribe(listener), // returns unsubscribe
-};
-```
-
-The deprecated `window.__THREE_GAME_STUDIO_AGENT__` global points to the same bridge object during the compatibility window. New integrations must use the canonical ThreeJS Studio global and protocol.
-
-Read requests return a structured `completed` result. A mutating bridge request does not silently edit the project: it returns `approval_required`, opens the matching proposal in the Assistant, and waits for the user to Apply or Discard it. Subscribers receive bounded events for proposal creation/application/dismissal and project revision changes.
-
-Its contract must remain:
-
-- Versioned and limited to the current open editor page.
-- Snapshot reads return clones.
-- Mutation calls require the expected authoring revision.
-- Results are structured and never depend on parsing toast text.
-- No DOM nodes, React setters, Three.js instances, browser object URLs, raw IndexedDB handles, credentials, or arbitrary code execution are exposed.
-
-The global bridge is **not an MCP server** and is not an authentication or authorization boundary. Its scope labels are advisory until a trusted host enforces them, and any code executing in the same page realm can invoke its read operations or submit a proposal. Installing the future external connection must be opt-in and requires a companion adapter with pairing, authentication, enforced scopes, rate/size limits, cancellation, and audit attribution.
-
-## External MCP phase
-
-The first external adapter should be a local sidecar using MCP stdio toward the user's MCP host. The sidecar should serve or pair with the local editor over a loopback-only authenticated channel:
-
-- Bind to `127.0.0.1`, never every interface.
-- Require a high-entropy, one-time pairing flow confirmed in the editor.
-- Validate the browser origin and assign a random per-tab session ID.
-- Start read-only and grant project/editor/file/build scopes explicitly.
-- Treat the browser as final authority for revision and approval checks.
-- Reuse the existing capability manifest and executors rather than reimplementing project behavior.
-
-This sidecar is planned, not present in the current repository. A hosted MCP service is a later collaboration phase and would require HTTPS Streamable HTTP, OAuth, resource-bound authorization, durable project storage, and server-side audit. An HTTPS-hosted page should not assume it can safely or reliably connect to an arbitrary unauthenticated local WebSocket.
-
-## Built-in model-provider phase
-
-The current Guided Assistant is intentionally local and deterministic. It recognizes a bounded set of scene summaries, creation, transform, material, behavior, visibility, duplication, deletion, and world-background requests. It can also accept structured tool-call JSON. This proves the planning, review, validation, commit, and Undo path without pretending a language model is present.
-
-A future model-backed provider will receive the same cloned context and capability manifest, then return the same proposal shape. Provider/model code remains outside the editor core.
-
-No cloud API key may be embedded in Vite variables, shipped JavaScript, localStorage, prompts, logs, or project packages. A real cloud provider requires one of:
-
-- A secure backend/token broker.
-- A desktop or local companion using operating-system secret storage.
-- A local model.
-- An external MCP host that already owns its model credentials.
-
-The browser assistant must not ask users to paste provider secrets into an ordinary project form.
-
-## Binary assets
-
-The current browser host may request the existing project/model file picker, but the user chooses the file and the importer enforces its normal validation. Agents receive model metadata and stable asset IDs, not arbitrary filesystem paths or IndexedDB handles.
-
-Large binaries must not be base64-encoded into normal MCP or model tool calls. The external asset phase should use a staged protocol:
-
-1. `prepare` declares filename, MIME type, byte length, SHA-256 digest, and intent.
-2. The trusted adapter returns a short-lived upload ID and size/type limits.
-3. Bytes transfer out of band over an authenticated, chunked local or hosted endpoint.
-4. The browser verifies size/digest and runs the existing importer before mutation.
-5. `complete` atomically stores the source, updates asset metadata/revision, and optionally creates an instance.
-6. Abandoned staging records expire and are garbage-collected.
-
-Relink uses the same sequence with an expected asset revision. The adapter must never accept unrestricted `file://` paths or silently read folders.
-
-## Audit and privacy roadmap
-
-Every external or model-backed commit should eventually append a domain event containing project/revision, timestamp, actor type, authenticated session/client, operation ID, affected stable references, before/after hashes, approval reference, warnings, and outcome. Undo/Redo create new events rather than erasing prior history.
-
-Do not record binary contents, access tokens, provider secrets, or raw prompts by default. The editor console remains operational feedback, not a durable security audit log.
-
-## Delivery phases
-
-1. **Shipped foundation:** typed manifest, pure project tools including keyboard-first named Input Actions, capability/risk metadata, Guided Assistant, proposal review, atomic pure project-tool batch execution, browser-host tools, trusted same-page integration bridge, revision guard, normal history integration, and contract/browser tests.
-2. **Parity hardening:** move remaining human-only project mutations behind shared commands, add schema-field coverage checks, durable operation envelopes, actor attribution, and append-only events.
-3. **Local MCP sidecar:** stdio MCP adapter, loopback pairing, read-only discovery first, scoped writes, cancellation, and audit linkage.
-4. **Staged assets/builds:** out-of-band binary transfer, digests, quotas, task progress, build artifact handles, and relink transactions.
-5. **Model-backed assistant:** provider abstraction connected to a local model, secure companion, or backend; same proposals and approvals.
-6. **Hosted collaboration:** backend-authoritative revisions, object storage, OAuth-protected MCP transport, project membership, durable audit, and conflict-aware multi-user authoring.
-
-The architectural rule across every phase is simple: adding more intelligence or transport must not create a more privileged mutation path than the one used by the human editor.
+1. Define a v5-native command registry and route both legacy scene commits and new game surfaces through it.
+2. Add typed operations/tools for generalized input, physics, state/events, runtime UI, permissions, and build settings.
+3. Replace the specialized `runtime-bindings.v1` behavior adapters with compiled behavior execution in the shared sandboxed runtime.
+4. Make Play and export consume the same compiled runtime snapshot and generic runtime-UI implementation.
+5. Pass Collect & Escape through both human and agent authoring paths and the complete script-driven offline journey.
+6. Add staged binary transport, a local MCP adapter, provider adapters, then hosted collaboration.

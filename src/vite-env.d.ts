@@ -43,6 +43,11 @@ interface ThreeJSStudioDiagnostics {
       rotation: number[];
       scale: number[];
     }>;
+    game?: {
+      snapshot: unknown;
+      diagnostics: unknown;
+      hud: unknown;
+    };
   };
 }
 
@@ -62,7 +67,8 @@ interface ThreeJSStudioAgentEvent {
 }
 
 interface ThreeJSStudioAgentBridge {
-  apiVersion: 1;
+  /** V2 snapshots expose ProjectDocumentV5 as `project`. */
+  apiVersion: 2;
   manifest(): unknown;
   snapshot(): unknown;
   request(request: ThreeJSStudioAgentRequest): Promise<unknown>;

@@ -30,6 +30,8 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Button } from '@/components/ui/button';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { InputActionsEditor } from './InputActionsEditor';
 import { createGameplayComponent } from './project';
 import { formatBytes, formatTriangles } from './modelAssets';
@@ -71,18 +73,28 @@ export function IconButton({
   className = '',
 }: IconButtonProps) {
   return (
-    <button
-      type="button"
-      className={`icon-button ${active ? 'is-active' : ''} ${compact ? 'is-compact' : ''} ${className}`}
-      aria-label={label}
-      title={label}
-      aria-pressed={active}
-      disabled={disabled}
-      onClick={onClick}
-      data-testid={testId}
-    >
-      {children}
-    </button>
+    <Tooltip>
+      <TooltipTrigger
+        disabled={disabled}
+        render={
+          <Button
+            type="button"
+            variant={null}
+            size={null}
+            className={`icon-button ${active ? 'is-active' : ''} ${compact ? 'is-compact' : ''} ${className}`}
+            aria-label={label}
+            title={label}
+            aria-pressed={active}
+            disabled={disabled}
+            onClick={onClick}
+            data-testid={testId}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -414,12 +426,11 @@ interface InspectorProps {
   onDelete: () => void;
 }
 
-function ComponentHeading({ icon, title, onRemove }: { icon: ReactNode; title: string; onRemove?: () => void }) {
+function ComponentHeading({ icon, title }: { icon: ReactNode; title: string }) {
   return (
     <div className="component-heading">
       <span>{icon}</span>
       <strong>{title}</strong>
-      {onRemove ? <button type="button" aria-label={`Remove ${title}`} onClick={onRemove}><Trash2 size={12} /></button> : null}
     </div>
   );
 }
@@ -463,7 +474,8 @@ function GameplayComponentEditor({
 
   return (
     <details className="component gameplay-component" open data-component-id={component.id}>
-      <summary><ComponentHeading icon={icon} title={experience === 'essentials' ? copy.essential : copy.advanced} onRemove={disabled ? undefined : onRemove} /></summary>
+      <summary><ComponentHeading icon={icon} title={experience === 'essentials' ? copy.essential : copy.advanced} /></summary>
+      {!disabled ? <button type="button" className="component-remove-button" aria-label={`Remove ${experience === 'essentials' ? copy.essential : copy.advanced}`} onClick={onRemove}><Trash2 size={12} /></button> : null}
       <div className="component-body property-stack">
         <p className="component-description">{copy.description}</p>
         <label className="property-row checkbox-row"><span className="property-label">Active</span><label><input type="checkbox" checked={component.enabled} disabled={disabled} onChange={(event) => onChange({ ...component, enabled: event.target.checked }, 'Toggle gameplay component')} /> Run in Play mode</label></label>
@@ -560,6 +572,7 @@ export function InspectorPanel({ node, disabled, project, experience, assetStatu
           <span className={`object-type-icon object-type-${node.kind}`}><NodeGlyph node={node} /></span>
           <input
             className="object-name-input"
+            aria-label="Object name"
             value={node.name}
             disabled={disabled || node.id === 'scene-root'}
             onChange={(event) => onUpdate({ ...node, name: event.target.value }, 'Rename object')}

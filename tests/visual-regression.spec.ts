@@ -18,6 +18,7 @@ async function prepare(page: Page) {
     content: `
       *, *::before, *::after { animation: none !important; transition: none !important; caret-color: transparent !important; }
       .toast, .viewport-stats, .autosave-state { visibility: hidden !important; }
+      .statusbar > div:last-child > span:nth-child(3) { visibility: hidden !important; }
     `,
   });
   await page.waitForTimeout(120);
@@ -122,7 +123,12 @@ test('Advanced imported model authoring visual baseline', async ({ page }, testI
     await page.getByRole('button', { name: 'Project assets' }).click();
   }
   await page.locator('[data-asset-id^="model-asset-"]').click();
-  await page.addStyleTag({ content: '.toast, .model-import-status, .viewport-stats { visibility: hidden !important; }' });
+  await page.addStyleTag({
+    content: `
+      .toast, .model-import-status, .viewport-stats { visibility: hidden !important; }
+      .model-diagnostics-grid > .is-wide > code { visibility: hidden !important; }
+    `,
+  });
   const frame = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.frame ?? 0);
   await page.waitForFunction((previousFrame) => (window.__THREEJS_STUDIO_DIAGNOSTICS__?.frame ?? 0) > previousFrame + 2, frame);
   await page.waitForTimeout(120);

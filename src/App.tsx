@@ -9,6 +9,7 @@ import {
   Copy,
   Crosshair,
   Cylinder,
+  FileCode2,
   FileJson,
   FolderOpen,
   Globe2,
@@ -44,6 +45,26 @@ import {
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  Command as CommandMenu,
+  CommandEmpty,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandShortcut,
+} from '@/components/ui/command';
+import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import {
+  Menubar,
+  MenubarContent,
+  MenubarGroup,
+  MenubarItem,
+  MenubarLabel,
+  MenubarMenu,
+  MenubarSeparator,
+  MenubarShortcut,
+  MenubarTrigger,
+} from '@/components/ui/menubar';
 import { AgentPanel, type AssistantMessage, type AssistantPlan } from './editor/AgentPanel';
 import { BottomDock, HierarchyPanel, IconButton, InspectorPanel, primitiveLabel } from './editor/components';
 import {
@@ -54,20 +75,31 @@ import {
 } from './editor/agentRuntime';
 import {
   AGENT_CAPABILITY_MANIFEST,
+  AGENT_GAME_CAPABILITY_MANIFEST,
+  assessAgentGameToolCall,
   assessAgentToolCall,
+  executeAgentGameTool,
   getAgentToolDefinition,
   validateAgentToolArguments,
+  type AgentGameToolName,
+  type AgentGameToolResult,
   type AgentToolName,
 } from './editor/agentTools';
 import {
-  createPortableProjectBundle,
+  createPortableGameProjectBundle,
   deleteModelAssetSource,
   getModelAssetSource,
   putModelAssetSource,
+  readPortableGameProjectBundle,
   readPortableProjectBundle,
   sourceToDataUrl,
 } from './editor/assetStore';
 import { analyzeModelFile, formatTriangles } from './editor/modelAssets';
+import {
+  createLegacySceneView,
+  loadGameProjectDocument,
+  syncLegacySceneToV5,
+} from './editor/gameProject';
 import {
   addModelAsset,
   addModelInstance,
@@ -94,6 +126,7 @@ import type {
   ModelAssetRecord,
   PrimitiveType,
   ProjectDocument,
+  ProjectDocumentV5,
   ProjectSettings,
   RendererStats,
   SceneNode,
@@ -101,9 +134,17 @@ import type {
   ViewMode,
 } from './editor/types';
 import { ViewportEngine } from './editor/ViewportEngine';
+import { createCollectEscapeProject } from './templates/collectEscape';
+import { GameAuthoringWorkspace } from './components/studio/GameAuthoringWorkspace';
+import { detectProjectRuntimeBindings } from './runtime/ProjectGameRuntime';
+import {
+  assertProjectBuildRevision,
+  captureProjectBuildSnapshot,
+} from './build/projectBuildTransaction';
 
-const STORAGE_KEY = 'threejs-studio:project:v4';
+const STORAGE_KEY = 'threejs-studio:project:v5';
 const LEGACY_STORAGE_KEYS = [
+  'threejs-studio:project:v4',
   'threejs-game-studio:project:v4',
   'threejs-game-studio:project:v3',
   'threejs-game-studio:project:v2',
@@ -117,6 +158,7 @@ const MAX_HISTORY = 60;
 
 type ExperienceLevel = 'essentials' | 'advanced';
 type QuickStartStep = 'add' | 'style' | 'play' | 'complete';
+type ApplicationMenuName = 'file' | 'edit' | 'object' | 'window' | 'help';
 
 interface QuickStartProgress {
   added: boolean;
@@ -127,6 +169,7 @@ interface QuickStartProgress {
 
 interface HistoryEntry {
   document: ProjectDocument;
+  gameDocument: ProjectDocumentV5;
   label: string;
 }
 
@@ -152,8 +195,9 @@ interface CommandAction {
 interface PendingAssistantPlan extends AssistantPlan {
   baseRevision: number;
   source: 'guided' | 'bridge';
-  toolCalls: StudioAgentToolCall[];
+  toolCalls: Array<StudioAgentToolCall | { name: AgentGameToolName; arguments: Record<string, unknown> }>;
   batch?: StudioAgentBatchResult;
+  gameResult?: AgentGameToolResult;
 }
 
 interface EditorToolExecutionResult {
@@ -172,22 +216,30 @@ interface AssistantCommitMarker {
 
 type EditorActor = NonNullable<ThreeJSStudioAgentEvent['actor']>;
 
-function loadInitialProject() {
+interface LoadedEditorProject {
+  project: ProjectDocument;
+  gameProject: ProjectDocumentV5;
+}
+
+function loadInitialProject(): LoadedEditorProject {
   for (const key of [STORAGE_KEY, ...LEGACY_STORAGE_KEYS]) {
     try {
       const saved = localStorage.getItem(key);
       if (saved) {
-        const result = loadProjectDocument(JSON.parse(saved) as unknown);
+        const result = loadGameProjectDocument(JSON.parse(saved) as unknown);
         if (result.ok) {
           if (key !== STORAGE_KEY) localStorage.setItem(STORAGE_KEY, JSON.stringify(result.project));
-          return result.project;
+          return { gameProject: result.project, project: createLegacySceneView(result.project) };
         }
       }
     } catch {
       // Try the next recovery source before falling back to the starter scene.
     }
   }
-  return createStarterProject();
+  const project = createStarterProject();
+  const migrated = loadGameProjectDocument(project);
+  if (!migrated.ok) throw new Error(migrated.errors.join(' '));
+  return { gameProject: migrated.project, project };
 }
 
 function loadExperience(): ExperienceLevel {
@@ -231,6 +283,16 @@ function nowLabel() {
 
 function safeFilename(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'threejs-game';
+}
+
+function downloadBinaryFile(bytes: Uint8Array, filename: string, mimeType = 'application/zip') {
+  const blob = new Blob([bytes.slice().buffer], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function modelDisplayName(filename: string) {
@@ -296,11 +358,16 @@ function summarizeAgentBatch(batch: StudioAgentBatchResult) {
 
 function MenuItem({ icon, label, shortcut, disabled, danger, onClick }: MenuItemProps) {
   return (
-    <button type="button" className={`menu-item ${danger ? 'is-danger' : ''}`} disabled={disabled} onClick={onClick}>
+    <MenubarItem
+      className={`menu-item !grid !grid-cols-[22px_1fr_auto] ${danger ? 'is-danger' : ''}`}
+      variant={danger ? 'destructive' : 'default'}
+      disabled={disabled}
+      onClick={onClick}
+    >
       <span className="menu-item-icon">{icon}</span>
       <span>{label}</span>
-      {shortcut ? <kbd>{shortcut}</kbd> : null}
-    </button>
+      {shortcut ? <MenubarShortcut><kbd>{shortcut}</kbd></MenubarShortcut> : null}
+    </MenubarItem>
   );
 }
 
@@ -314,14 +381,19 @@ function PrimitiveIcon({ primitive }: { primitive: PrimitiveType }) {
 const primitives: PrimitiveType[] = ['box', 'sphere', 'capsule', 'cylinder', 'cone', 'plane', 'torus'];
 
 export default function App() {
-  const [project, setProject] = useState<ProjectDocument>(loadInitialProject);
+  const [initialProject] = useState<LoadedEditorProject>(loadInitialProject);
+  const [project, setProject] = useState<ProjectDocument>(initialProject.project);
   const projectRef = useRef(project);
+  const gameProjectRef = useRef<ProjectDocumentV5>(initialProject.gameProject);
   const [experience, setExperience] = useState<ExperienceLevel>(loadExperience);
   const [quickStart, setQuickStart] = useState<QuickStartProgress>(loadQuickStart);
   const [selectedId, setSelectedId] = useState<string | null>('player-core');
   const [tool, setTool] = useState<EditorTool>('translate');
   const [mode, setMode] = useState<EditorMode>('edit');
   const modeRef = useRef<EditorMode>('edit');
+  const [runtimePreparing, setRuntimePreparing] = useState(false);
+  const playRequestRef = useRef(0);
+  const playStartInFlightRef = useRef<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('scene');
   const [space, setSpace] = useState<'local' | 'world'>('world');
   const [snap, setSnap] = useState(false);
@@ -329,14 +401,15 @@ export default function App() {
   const [hierarchyOpen, setHierarchyOpen] = useState(() => window.innerWidth > 960);
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth > 960);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [gameAuthoringOpen, setGameAuthoringOpen] = useState(false);
   const [bottomOpen, setBottomOpen] = useState(() => experience === 'advanced' && window.innerWidth > 720);
   const [bottomTab, setBottomTab] = useState<'assets' | 'console'>('assets');
   const [previewMode, setPreviewMode] = useState(false);
-  const [openMenu, setOpenMenu] = useState<'file' | 'edit' | 'object' | 'window' | 'help' | null>(null);
+  const [openMenu, setOpenMenu] = useState<ApplicationMenuName | null>(null);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const commandPaletteReturnFocusRef = useRef<HTMLElement | null>(null);
   const [commandQuery, setCommandQuery] = useState('');
-  const [commandIndex, setCommandIndex] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [lastSaved, setLastSaved] = useState('Loaded');
   const [toast, setToast] = useState<string | null>('Starter scene ready — add a shape or adjust Player Core.');
@@ -363,6 +436,7 @@ export default function App() {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<ViewportEngine | null>(null);
   const dragStartRef = useRef<ProjectDocument | null>(null);
+  const dragGameStartRef = useRef<ProjectDocumentV5 | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const modelInputRef = useRef<HTMLInputElement | null>(null);
   const relinkAssetIdRef = useRef<string | null>(null);
@@ -371,7 +445,7 @@ export default function App() {
   const assistantRequestRef = useRef<(request: ThreeJSStudioAgentRequest) => Promise<unknown>>(async () => ({ status: 'unavailable' }));
 
   const selectedNode = getNode(project, selectedId);
-  const editingDisabled = mode !== 'edit';
+  const editingDisabled = mode !== 'edit' || runtimePreparing;
   const quickStartStep = getQuickStartStep(quickStart);
   const studioAssets = useMemo<StudioAsset[]>(() => [
     ...BUILT_IN_ASSETS,
@@ -397,6 +471,13 @@ export default function App() {
 
   const showToast = useCallback((message: string) => {
     setToast(message);
+  }, []);
+
+  const openCommandPalette = useCallback(() => {
+    commandPaletteReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    setCommandPaletteOpen(true);
   }, []);
 
   const markQuickStart = useCallback((key: 'added' | 'styled' | 'played') => {
@@ -444,10 +525,52 @@ export default function App() {
       return false;
     }
     const previous = cloneProject(projectRef.current);
-    setUndoStack((entries) => [...entries, { document: previous, label }].slice(-MAX_HISTORY));
+    const previousGame = structuredClone(gameProjectRef.current);
+    try {
+      if (next.id === gameProjectRef.current.id) {
+        gameProjectRef.current = syncLegacySceneToV5(gameProjectRef.current, next);
+      } else {
+        const replacement = loadGameProjectDocument(next);
+        if (!replacement.ok) throw new Error(replacement.errors.join(' '));
+        gameProjectRef.current = replacement.project;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'The project command could not be applied.';
+      addLog(message, 'warning');
+      showToast(message);
+      return false;
+    }
+    setUndoStack((entries) => [...entries, { document: previous, gameDocument: previousGame, label }].slice(-MAX_HISTORY));
     setRedoStack([]);
     projectRef.current = next;
     setProject(next);
+    setDirty(true);
+    const revision = bumpProjectRevision();
+    addLog(label);
+    publishAssistantEvent({ type: 'project.changed', revision, label, actor });
+    return true;
+  }, [addLog, bumpProjectRevision, publishAssistantEvent, showToast]);
+
+  const commitGameProject = useCallback((next: ProjectDocumentV5, label: string, actor: EditorActor = 'human') => {
+    if (modeRef.current !== 'edit') {
+      showToast('Stop Play mode before changing projects');
+      return false;
+    }
+    const validated = loadGameProjectDocument(next);
+    if (!validated.ok) {
+      const message = validated.errors[0] ?? 'The game project is invalid.';
+      addLog(message, 'warning');
+      showToast(message);
+      return false;
+    }
+    const previous = cloneProject(projectRef.current);
+    const previousGame = structuredClone(gameProjectRef.current);
+    const legacy = createLegacySceneView(validated.project);
+    setUndoStack((entries) => [...entries, { document: previous, gameDocument: previousGame, label }].slice(-MAX_HISTORY));
+    setRedoStack([]);
+    gameProjectRef.current = validated.project;
+    projectRef.current = legacy;
+    setProject(legacy);
     setDirty(true);
     const revision = bumpProjectRevision();
     addLog(label);
@@ -493,9 +616,11 @@ export default function App() {
     const entry = undoStack.at(-1);
     if (!entry) return;
     const current = cloneProject(projectRef.current);
+    const currentGame = structuredClone(gameProjectRef.current);
     const restored = cloneProject(entry.document);
     setUndoStack((entries) => entries.slice(0, -1));
-    setRedoStack((entries) => [...entries, { document: current, label: entry.label }].slice(-MAX_HISTORY));
+    setRedoStack((entries) => [...entries, { document: current, gameDocument: currentGame, label: entry.label }].slice(-MAX_HISTORY));
+    gameProjectRef.current = structuredClone(entry.gameDocument);
     projectRef.current = restored;
     setProject(restored);
     setDirty(true);
@@ -510,9 +635,11 @@ export default function App() {
     const entry = redoStack.at(-1);
     if (!entry) return;
     const current = cloneProject(projectRef.current);
+    const currentGame = structuredClone(gameProjectRef.current);
     const restored = cloneProject(entry.document);
     setRedoStack((entries) => entries.slice(0, -1));
-    setUndoStack((entries) => [...entries, { document: current, label: entry.label }].slice(-MAX_HISTORY));
+    setUndoStack((entries) => [...entries, { document: current, gameDocument: currentGame, label: entry.label }].slice(-MAX_HISTORY));
+    gameProjectRef.current = structuredClone(entry.gameDocument);
     projectRef.current = restored;
     setProject(restored);
     setDirty(true);
@@ -573,7 +700,7 @@ export default function App() {
 
   const saveProject = useCallback((announce = true) => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(projectRef.current));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(gameProjectRef.current));
       setDirty(false);
       setLastSaved('Saved just now');
       if (announce) {
@@ -589,18 +716,18 @@ export default function App() {
   }, [addLog, showToast]);
 
   const exportProject = useCallback(async (requestedFilename?: string) => {
-    const current = projectRef.current;
+    const current = gameProjectRef.current;
     try {
-      const { bundle, missingAssetIds } = await createPortableProjectBundle(current);
+      const { bundle, missingAssetIds } = await createPortableGameProjectBundle(current);
       downloadTextFile(JSON.stringify(bundle, null, 2), requestedFilename?.trim() || `${safeFilename(current.name)}.tjsstudio.json`);
       if (missingAssetIds.length) {
         addLog(`Project exported with ${missingAssetIds.length} missing model file${missingAssetIds.length === 1 ? '' : 's'}`, 'warning');
-        showToast('Project exported · relink missing models before sharing');
+        showToast('Game project exported · relink missing models before sharing');
         return { ok: true, message: `Project exported with ${missingAssetIds.length} missing model source${missingAssetIds.length === 1 ? '' : 's'}.` };
       } else {
-        addLog('Editable project package exported with local models', 'success');
-        showToast('Project package exported');
-        return { ok: true, message: 'Editable project package exported with available model sources.' };
+        addLog('Schema-v5 game project exported with local models', 'success');
+        showToast('Schema-v5 game project package exported');
+        return { ok: true, message: 'Schema-v5 game project package exported with available model sources.' };
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Could not package the project';
@@ -610,7 +737,7 @@ export default function App() {
     }
   }, [addLog, showToast]);
 
-  const buildWebGame = useCallback(async (requestedFilename?: string) => {
+  const buildLegacyWebGame = useCallback(async (requestedFilename?: string) => {
     const current = projectRef.current;
     try {
       const referencedAssetIds = new Set(
@@ -643,16 +770,144 @@ export default function App() {
     }
   }, [addLog, showToast]);
 
-  const startPlay = useCallback(() => {
-    if (modeRef.current !== 'edit') return;
-    modeRef.current = 'play';
-    setMode('play');
-    setViewMode('game');
-    markQuickStart('played');
-    addLog('Entered Play mode', 'success');
-  }, [addLog, markQuickStart]);
+  const buildWebGame = useCallback(async (requestedFilename?: string) => {
+    const snapshot = captureProjectBuildSnapshot(gameProjectRef.current, projectRevisionRef.current);
+    const current = snapshot.project;
+    const profileRecord = current.buildProfiles.find((entry) => entry.id === current.defaultBuildProfileId);
+    const profile = profileRecord?.mode ?? 'production';
+    const buildAbort = new AbortController();
+    const assertCurrentRevision = () => {
+      try {
+        assertProjectBuildRevision(snapshot, projectRevisionRef.current);
+      } catch (error) {
+        buildAbort.abort(error);
+        throw error;
+      }
+    };
+    try {
+      const modelAssets = current.assets.filter((asset) => asset.kind === 'model');
+      const assets = [];
+      const missing: string[] = [];
+      for (const asset of modelAssets) {
+        const source = await getModelAssetSource(current.id, asset.id, asset.revision);
+        assertCurrentRevision();
+        if (!source) {
+          const referenced = current.entities.some((entity) => entity.model?.assetId === asset.id);
+          if (referenced) missing.push(asset.name);
+          continue;
+        }
+        const extension = /\.[a-z0-9]{1,8}$/iu.exec(source.fileName)?.[0].toLowerCase() ?? '.bin';
+        assets.push({
+          path: `models/${asset.id}/${safeFilename(source.fileName.replace(/\.[^.]+$/u, ''))}${extension}`,
+          contents: source.bytes,
+          mediaType: source.mimeType || 'application/octet-stream',
+          compression: 'auto' as const,
+        });
+      }
+      assertCurrentRevision();
+      if (missing.length) throw new Error(`Relink ${missing.join(', ')} before building.`);
+
+      const [{ buildOfflineZip }, { createDefaultOfflineRuntimeBundle }, { compileProjectScriptsForBuild }] = await Promise.all([
+        import('./build'),
+        import('./build/runtime/createDefaultOfflineRuntimeBundle'),
+        import('./build/scriptBuild'),
+      ]);
+      assertCurrentRevision();
+      const compiled = await compileProjectScriptsForBuild(current, snapshot.revision, profile);
+      assertCurrentRevision();
+      if (!compiled.bundle && compiled.diagnostics.length) throw new Error(compiled.diagnostics[0]);
+      const result = await buildOfflineZip({
+        profile,
+        projectName: current.name,
+        title: current.name,
+        ...(requestedFilename?.trim() ? { filename: requestedFilename.trim() } : {}),
+        runtime: createDefaultOfflineRuntimeBundle(),
+        ...(compiled.bundle ? { scripts: compiled.bundle } : {}),
+        project: {
+          path: 'project.json',
+          contents: JSON.stringify(current),
+          mediaType: 'application/json; charset=utf-8',
+          compression: 'deflate',
+        },
+        assets,
+        signal: buildAbort.signal,
+        onProgress: assertCurrentRevision,
+      });
+      assertCurrentRevision();
+      downloadBinaryFile(result.archive, result.filename);
+      addLog(`Offline ${profile} build generated · ${result.manifest.files.length} files · ${result.archiveSha256.slice(0, 12)}`, 'success');
+      showToast('Offline web game built as a production ZIP');
+      return {
+        ok: true,
+        message: `Offline ${profile} ZIP generated with no network dependencies.`,
+        filename: result.filename,
+        sha256: result.archiveSha256,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Could not build the web game';
+      addLog(`Build failed · ${message}`, 'warning');
+      showToast(`Build failed · ${message}`);
+      return { ok: false, message };
+    }
+  }, [addLog, showToast]);
+
+  const createCollectEscape = useCallback(() => {
+    if (!commitGameProject(createCollectEscapeProject(), 'Create Collect & Escape game')) return;
+    setSelectedId('entity.player');
+    setAssetStatuses({});
+    setExperience('advanced');
+    setGameAuthoringOpen(true);
+    showToast('Collect & Escape created · scripts, physics, HUD, input, and build profile included');
+  }, [commitGameProject, showToast]);
+
+  const startPlay = useCallback(async () => {
+    if (modeRef.current !== 'edit' || playStartInFlightRef.current !== null) return false;
+    const request = ++playRequestRef.current;
+    const revision = projectRevisionRef.current;
+    const gameProject = gameProjectRef.current;
+    playStartInFlightRef.current = request;
+    setRuntimePreparing(true);
+    try {
+      const engine = engineRef.current;
+      if (!engine) throw new Error('The viewport runtime is unavailable.');
+      const requiresGameRuntime = detectProjectRuntimeBindings(gameProject) !== null;
+      const prepared = await engine.prepareGameRuntime(gameProject);
+      if (request !== playRequestRef.current || modeRef.current !== 'edit' || revision !== projectRevisionRef.current) {
+        // The synchronous in-flight owner prevents a newer Play preparation
+        // from starting until this call settles, so this cleanup can only
+        // dispose the stale controller produced by this request.
+        engine.cancelPreparedGameRuntime();
+        return false;
+      }
+      if (requiresGameRuntime && !prepared) {
+        engine.cancelPreparedGameRuntime();
+        throw new Error('The project game runtime was detected but could not be prepared.');
+      }
+      setGameAuthoringOpen(false);
+      modeRef.current = 'play';
+      setMode('play');
+      setViewMode('game');
+      markQuickStart('played');
+      addLog('Entered Play mode · disposable runtime clone started', 'success');
+      return true;
+    } catch (error) {
+      if (request === playRequestRef.current) engineRef.current?.cancelPreparedGameRuntime();
+      const message = error instanceof Error ? error.message : 'The game runtime could not be prepared.';
+      addLog(`Play failed · ${message}`, 'warning');
+      showToast(`Play failed · ${message}`);
+      return false;
+    } finally {
+      if (playStartInFlightRef.current === request) {
+        playStartInFlightRef.current = null;
+        setRuntimePreparing(false);
+      }
+    }
+  }, [addLog, markQuickStart, showToast]);
 
   const stopPlay = useCallback(() => {
+    playRequestRef.current += 1;
+    setRuntimePreparing(false);
+    if (modeRef.current === 'edit') engineRef.current?.cancelPreparedGameRuntime();
     modeRef.current = 'edit';
     setMode('edit');
     setViewMode('scene');
@@ -668,16 +923,15 @@ export default function App() {
     });
   }, []);
 
-  const enterPreview = useCallback(() => {
-    if (modeRef.current !== 'edit') return;
+  const enterPreview = useCallback(async () => {
+    if (modeRef.current !== 'edit' || playStartInFlightRef.current !== null) return false;
     setAssistantOpen(false);
     setPreviewMode(true);
-    setViewMode('game');
-    modeRef.current = 'play';
-    setMode('play');
-    markQuickStart('played');
-    addLog('Fullscreen game preview started', 'success');
-  }, [addLog, markQuickStart]);
+    const started = await startPlay();
+    if (started) addLog('Clean game preview started', 'success');
+    else setPreviewMode(false);
+    return started;
+  }, [addLog, startPlay]);
 
   const activateAsset = useCallback((asset: StudioAsset) => {
     if (modeRef.current !== 'edit') return;
@@ -810,7 +1064,39 @@ export default function App() {
     if (!file || modeRef.current !== 'edit') return;
     try {
       const value: unknown = JSON.parse(await file.text());
+      const gamePortable = readPortableGameProjectBundle(value);
+      if (gamePortable) {
+        const loaded = loadGameProjectDocument(gamePortable.project);
+        if (!loaded.ok) throw new Error(loaded.errors[0] ?? 'Unsupported schema-v5 project package');
+        for (const entry of gamePortable.sources) {
+          const asset = loaded.project.assets.find((candidate) => candidate.kind === 'model' && candidate.id === entry.assetId);
+          if (!asset || asset.revision !== entry.revision) {
+            throw new Error(`Game project package source ${entry.assetId} does not match its asset metadata.`);
+          }
+        }
+        for (const entry of gamePortable.sources) {
+          await putModelAssetSource(loaded.project.id, entry.assetId, entry.revision, entry.source);
+        }
+        if (!commitGameProject(loaded.project, `Import ${file.name}`)) return;
+        const legacy = createLegacySceneView(loaded.project);
+        setSelectedId(legacy.nodes[0]?.id ?? null);
+        setAssetStatuses({});
+        addLog(`Imported schema-v5 package ${file.name}`, 'success');
+        showToast(`Game project imported with ${gamePortable.sources.length} local model source${gamePortable.sources.length === 1 ? '' : 's'}`);
+        return;
+      }
       const portable = readPortableProjectBundle(value);
+      if (!portable && typeof value === 'object' && value !== null && 'schemaVersion' in value && value.schemaVersion === 5) {
+        const loaded = loadGameProjectDocument(value);
+        if (!loaded.ok) throw new Error(loaded.errors[0] ?? 'Unsupported schema-v5 project');
+        if (!commitGameProject(loaded.project, `Import ${file.name}`)) return;
+        const legacy = createLegacySceneView(loaded.project);
+        setSelectedId(legacy.nodes[0]?.id ?? null);
+        setAssetStatuses({});
+        addLog(`Imported ${file.name} as schema v5`, 'success');
+        showToast('Schema v5 game project imported');
+        return;
+      }
       const result = loadProjectDocument(portable?.project ?? value);
       if (!result.ok) throw new Error(result.errors[0] ?? 'Unsupported project schema');
       if (portable) {
@@ -839,7 +1125,7 @@ export default function App() {
       addLog(`Import failed · ${message}`, 'warning');
       showToast(`Import failed · ${message}`);
     }
-  }, [addLog, commitProject, showToast]);
+  }, [addLog, commitGameProject, commitProject, showToast]);
 
   const resetStarter = useCallback(() => {
     if (modeRef.current !== 'edit') return;
@@ -881,6 +1167,7 @@ export default function App() {
       onSelect: setSelectedId,
       onTransformStart: () => {
         dragStartRef.current = cloneProject(projectRef.current);
+        dragGameStartRef.current = structuredClone(gameProjectRef.current);
       },
       onTransformChange: (id, transform, final) => {
         if (modeRef.current !== 'edit') return;
@@ -894,10 +1181,23 @@ export default function App() {
           return;
         }
         const before = dragStartRef.current;
-        if (before) {
-          setUndoStack((entries) => [...entries, { document: before, label: 'Transform object' }].slice(-MAX_HISTORY));
+        const gameBefore = dragGameStartRef.current;
+        if (before && gameBefore) {
+          try {
+            gameProjectRef.current = syncLegacySceneToV5(gameProjectRef.current, projectRef.current);
+          } catch (error) {
+            projectRef.current = before;
+            gameProjectRef.current = gameBefore;
+            setProject(before);
+            addLog(error instanceof Error ? error.message : 'The transform could not be committed.', 'warning');
+            dragStartRef.current = null;
+            dragGameStartRef.current = null;
+            return;
+          }
+          setUndoStack((entries) => [...entries, { document: before, gameDocument: gameBefore, label: 'Transform object' }].slice(-MAX_HISTORY));
           setRedoStack([]);
           dragStartRef.current = null;
+          dragGameStartRef.current = null;
           const revision = bumpProjectRevision();
           addLog('Transform object');
           publishAssistantEvent({ type: 'project.changed', revision, label: 'Transform object', actor: 'human' });
@@ -958,9 +1258,8 @@ export default function App() {
       if (isTyping) return;
       if (command && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        setCommandPaletteOpen(true);
+        openCommandPalette();
         setCommandQuery('');
-        setCommandIndex(0);
         return;
       }
       if (command && event.key.toLowerCase() === 's') {
@@ -1017,7 +1316,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [buildWebGame, commandPaletteOpen, deleteSelected, duplicateSelected, editingDisabled, redo, resetStarter, saveProject, startPlay, stopPlay, undo]);
+  }, [buildWebGame, commandPaletteOpen, deleteSelected, duplicateSelected, editingDisabled, openCommandPalette, redo, resetStarter, saveProject, startPlay, stopPlay, undo]);
 
   const openAssistantPanel = useCallback(() => {
     setAssistantOpen(true);
@@ -1033,8 +1332,10 @@ export default function App() {
 
   const commands = useMemo<CommandAction[]>(() => [
     { id: 'save', label: 'Save project', group: 'Project', shortcut: '⌘S', icon: <Save size={15} />, run: () => saveProject() },
+    { id: 'collect-escape', label: 'New Collect & Escape game', group: 'Project', icon: <Sparkles size={15} />, disabled: editingDisabled, run: createCollectEscape },
     { id: 'export', label: 'Export editable project', group: 'Project', icon: <FileJson size={15} />, run: exportProject },
-    { id: 'build', label: 'Build web game', group: 'Project', shortcut: '⌘B', icon: <Rocket size={15} />, run: buildWebGame },
+    { id: 'build', label: 'Build offline web game', group: 'Project', shortcut: '⌘B', icon: <Rocket size={15} />, run: buildWebGame },
+    { id: 'legacy-build', label: 'Build legacy single-file HTML', group: 'Project', icon: <FileJson size={15} />, run: buildLegacyWebGame },
     { id: 'play', label: mode === 'edit' ? 'Enter Play mode' : 'Stop Play mode', group: 'Runtime', shortcut: '⌘P', icon: mode === 'edit' ? <Play size={15} /> : <Square size={14} />, run: mode === 'edit' ? startPlay : stopPlay },
     { id: 'preview', label: 'Open clean game preview', group: 'Runtime', icon: <Globe2 size={15} />, disabled: editingDisabled, run: enterPreview },
     { id: 'frame', label: 'Frame selected object', group: 'Viewport', shortcut: 'F', icon: <Crosshair size={15} />, disabled: editingDisabled, run: () => engineRef.current?.frameSelection() },
@@ -1045,8 +1346,9 @@ export default function App() {
     { id: 'hierarchy', label: 'Toggle Hierarchy panel', group: 'Window', icon: <PanelLeftOpen size={15} />, run: () => setHierarchyOpen((open) => !open) },
     { id: 'inspector', label: 'Toggle Inspector panel', group: 'Window', icon: <PanelRightOpen size={15} />, run: () => setInspectorOpen((open) => !open) },
     { id: 'project-panel', label: 'Toggle Project panel', group: 'Window', icon: <PanelBottomOpen size={15} />, run: () => setBottomOpen((open) => !open) },
+    { id: 'game-authoring', label: 'Toggle Game Authoring workspace', group: 'Window', icon: <FileCode2 size={15} />, run: () => setGameAuthoringOpen((open) => !open) },
     { id: 'assistant', label: 'Open Studio Assistant', group: 'Window', icon: <Sparkles size={15} />, run: openAssistantPanel },
-  ], [buildWebGame, createEmptyGroup, createPrimitive, editingDisabled, enterPreview, exportProject, mode, openAssistantPanel, openModelPicker, saveProject, startPlay, stopPlay]);
+  ], [buildLegacyWebGame, buildWebGame, createCollectEscape, createEmptyGroup, createPrimitive, editingDisabled, enterPreview, exportProject, mode, openAssistantPanel, openModelPicker, saveProject, startPlay, stopPlay]);
 
   const filteredCommands = commands.filter((action) => action.label.toLowerCase().includes(commandQuery.toLowerCase()));
   const runCommand = (action: CommandAction) => {
@@ -1056,16 +1358,14 @@ export default function App() {
     action.run();
   };
 
-  useEffect(() => setCommandIndex(0), [commandPaletteOpen, commandQuery]);
-
   const closeMenus = () => {
     setOpenMenu(null);
     setAddMenuOpen(false);
   };
 
-  const toggleMenu = (menu: NonNullable<typeof openMenu>) => {
-    setOpenMenu((current) => current === menu ? null : menu);
-    setAddMenuOpen(false);
+  const handleMenuOpenChange = (menu: ApplicationMenuName, open: boolean) => {
+    setOpenMenu((current) => open ? menu : current === menu ? null : current);
+    if (open) setAddMenuOpen(false);
   };
 
   const toggleFullscreen = async () => {
@@ -1080,6 +1380,73 @@ export default function App() {
   const visibleMenus = experience === 'advanced'
     ? (['file', 'edit', 'object', 'window', 'help'] as const)
     : (['file', 'edit', 'object', 'help'] as const);
+
+  const renderApplicationMenu = (menu: ApplicationMenuName) => {
+    if (menu === 'file') {
+      return (
+        <>
+          <MenubarGroup>
+            <MenubarLabel className="menu-heading">Project</MenubarLabel>
+            <MenuItem icon={<Sparkles size={14} />} label="New starter project" shortcut="⌘N" disabled={editingDisabled} onClick={() => { resetStarter(); closeMenus(); }} />
+            <MenuItem icon={<Sparkles size={14} />} label="New Collect & Escape game" disabled={editingDisabled} onClick={() => { createCollectEscape(); closeMenus(); }} />
+            <MenuItem icon={<FolderOpen size={14} />} label="Open project…" shortcut="⌘O" disabled={editingDisabled} onClick={() => { importInputRef.current?.click(); closeMenus(); }} />
+            <MenuItem icon={<Save size={14} />} label="Save" shortcut="⌘S" onClick={() => { saveProject(); closeMenus(); }} />
+          </MenubarGroup>
+          <MenubarSeparator className="menu-separator" />
+          <MenuItem icon={<FileJson size={14} />} label="Export editable project" onClick={() => { exportProject(); closeMenus(); }} />
+          <MenuItem icon={<Rocket size={14} />} label="Build offline web game" shortcut="⌘B" onClick={() => { buildWebGame(); closeMenus(); }} />
+          <MenuItem icon={<FileJson size={14} />} label="Build legacy single-file HTML" onClick={() => { buildLegacyWebGame(); closeMenus(); }} />
+        </>
+      );
+    }
+
+    if (menu === 'edit') {
+      return (
+        <>
+          <MenuItem icon={<Undo2 size={14} />} label="Undo" shortcut="⌘Z" disabled={!undoStack.length || editingDisabled} onClick={() => { undo(); closeMenus(); }} />
+          <MenuItem icon={<Redo2 size={14} />} label="Redo" shortcut="⇧⌘Z" disabled={!redoStack.length || editingDisabled} onClick={() => { redo(); closeMenus(); }} />
+          <MenubarSeparator className="menu-separator" />
+          <MenuItem icon={<Copy size={14} />} label="Duplicate" shortcut="⌘D" disabled={!selectedId || editingDisabled} onClick={() => { duplicateSelected(); closeMenus(); }} />
+          <MenuItem icon={<Trash2 size={14} />} label="Delete" shortcut="⌫" danger disabled={!selectedId || selectedId === 'scene-root' || editingDisabled} onClick={() => { deleteSelected(); closeMenus(); }} />
+        </>
+      );
+    }
+
+    if (menu === 'object') {
+      return (
+        <>
+          <MenuItem icon={<Layers3 size={14} />} label="Empty Group" disabled={editingDisabled} onClick={() => { createEmptyGroup(); closeMenus(); }} />
+          <MenubarSeparator className="menu-separator" />
+          <MenubarGroup>
+            <MenubarLabel className="menu-heading">3D Object</MenubarLabel>
+            {primitives.map((primitive) => <MenuItem key={primitive} icon={<PrimitiveIcon primitive={primitive} />} label={primitiveLabel(primitive)} disabled={editingDisabled} onClick={() => { createPrimitive(primitive); closeMenus(); }} />)}
+          </MenubarGroup>
+        </>
+      );
+    }
+
+    if (menu === 'window') {
+      return (
+        <>
+          <MenuItem icon={<PanelLeftOpen size={14} />} label={`${hierarchyOpen ? 'Hide' : 'Show'} Hierarchy`} shortcut="⌘1" onClick={() => { setHierarchyOpen((open) => !open); closeMenus(); }} />
+          <MenuItem icon={<PanelRightOpen size={14} />} label={`${inspectorOpen ? 'Hide' : 'Show'} Inspector`} shortcut="⌘2" onClick={() => { setInspectorOpen((open) => !open); closeMenus(); }} />
+          <MenuItem icon={<PanelBottomOpen size={14} />} label={`${bottomOpen ? 'Hide' : 'Show'} Project`} shortcut="⌘3" onClick={() => { setBottomOpen((open) => !open); closeMenus(); }} />
+          <MenuItem icon={<FileCode2 size={14} />} label={`${gameAuthoringOpen ? 'Hide' : 'Show'} Game Authoring`} onClick={() => { setGameAuthoringOpen((open) => !open); closeMenus(); }} />
+          <MenubarSeparator className="menu-separator" />
+          <MenuItem icon={<Command size={14} />} label="Command palette" shortcut="⌘K" onClick={() => { openCommandPalette(); closeMenus(); }} />
+        </>
+      );
+    }
+
+    return (
+      <MenubarGroup>
+        <MenubarLabel className="menu-heading">ThreeJS Studio</MenubarLabel>
+        <MenuItem icon={<Sparkles size={14} />} label="Resume Quick Start" onClick={() => { setQuickStart((current) => ({ ...current, dismissed: false })); changeExperience('essentials'); closeMenus(); }} />
+        <MenuItem icon={<Command size={14} />} label="Keyboard shortcuts" onClick={() => { openCommandPalette(); closeMenus(); }} />
+        <MenuItem icon={<Globe2 size={14} />} label="About this build" onClick={() => { showToast('ThreeJS Studio · threejs.studio · Editor foundation v0.2'); closeMenus(); }} />
+      </MenubarGroup>
+    );
+  };
 
   const toggleMobilePanel = (panel: 'hierarchy' | 'inspector' | 'bottom') => {
     if (panel === 'hierarchy') {
@@ -1181,7 +1548,9 @@ export default function App() {
       const action = args.action as 'play' | 'pause' | 'resume' | 'step' | 'stop' | 'preview' | 'exit-preview';
       if (action === 'play') {
         if (modeRef.current !== 'edit') return { ok: false, changed: false, message: 'Runtime is already active.', errors: ['Play requires Edit mode.'] };
-        startPlay();
+        if (!await startPlay()) {
+          return { ok: false, changed: false, message: 'The runtime could not be started.', errors: ['Play initialization did not complete successfully.'] };
+        }
       } else if (action === 'pause') {
         if (modeRef.current !== 'play') return { ok: false, changed: false, message: 'Runtime is not playing.', errors: ['Pause requires Play mode.'] };
         togglePause();
@@ -1193,7 +1562,9 @@ export default function App() {
         engineRef.current?.step();
       } else if (action === 'preview') {
         if (modeRef.current !== 'edit') return { ok: false, changed: false, message: 'Runtime is already active.', errors: ['Preview requires Edit mode.'] };
-        enterPreview();
+        if (!await enterPreview()) {
+          return { ok: false, changed: false, message: 'Clean Preview could not be started.', errors: ['Preview initialization did not complete successfully.'] };
+        }
       } else if (action === 'exit-preview') {
         if (!previewMode) return { ok: false, changed: false, message: 'Clean Preview is not active.', errors: ['Exit Preview requires an active clean preview.'] };
         stopPlay();
@@ -1445,14 +1816,37 @@ export default function App() {
       appendAssistantMessage({ role: 'assistant', status: 'warning', text: `This proposal was prepared for revision ${plan.baseRevision}, but the project is now at revision ${projectRevisionRef.current}. Discard it and ask me to review the current scene.` });
       return;
     }
-    if (plan.batch && modeRef.current !== 'edit') {
+    if ((plan.batch || plan.gameResult?.changed) && modeRef.current !== 'edit') {
       appendAssistantMessage({ role: 'assistant', status: 'warning', text: 'Stop Play mode before applying authored scene changes.' });
       return;
     }
     assistantApplyInFlightRef.current = plan.id;
     setAssistantBusy(true);
     try {
-      if (plan.batch) {
+      if (plan.gameResult) {
+        const actor: EditorActor = plan.source === 'bridge' ? 'integration' : 'assistant';
+        if (plan.gameResult.changed) {
+          const label = plan.gameResult.history?.label
+            ? `${plan.source === 'bridge' ? 'Integration' : 'Studio Assistant'} · ${plan.gameResult.history.label}`
+            : `${plan.source === 'bridge' ? 'Integration' : 'Studio Assistant'} · ${plan.title}`;
+          if (!commitGameProject(plan.gameResult.project, label, actor)) return;
+          setLastAssistantCommit({ revision: projectRevisionRef.current, label, actor });
+          if (plan.gameResult.toolName === 'studio_create_collect_escape') {
+            setSelectedId('entity.player');
+            setAssetStatuses({});
+            setExperience('advanced');
+            setGameAuthoringOpen(true);
+          }
+        }
+        appendAssistantMessage({
+          role: 'tool',
+          label: plan.source === 'bridge' ? 'Integration tool result' : 'Tool result',
+          status: 'success',
+          text: plan.gameResult.changed
+            ? `${plan.gameResult.history?.label ?? plan.title} applied as one validated Undo step.`
+            : `${plan.title} completed successfully; the project was already up to date.`,
+        });
+      } else if (plan.batch) {
         const actor: EditorActor = plan.source === 'bridge' ? 'integration' : 'assistant';
         const label = `${plan.source === 'bridge' ? 'Integration' : 'Studio Assistant'} · ${plan.title}`;
         if (!commitProject(plan.batch.nextProject, label, actor)) return;
@@ -1464,7 +1858,7 @@ export default function App() {
       } else {
         const call = plan.toolCalls[0];
         const actor: EditorActor = plan.source === 'bridge' ? 'integration' : 'assistant';
-        const result = call ? await executeEditorHostTool(call.name, call.arguments, actor) : null;
+        const result = call ? await executeEditorHostTool(call.name as AgentToolName, call.arguments, actor) : null;
         if (!result?.ok) {
           appendAssistantMessage({ role: 'tool', status: 'warning', text: result?.errors.join('\n') || 'The live editor action could not be applied.' });
           return;
@@ -1482,7 +1876,7 @@ export default function App() {
       if (assistantApplyInFlightRef.current === plan.id) assistantApplyInFlightRef.current = null;
       setAssistantBusy(false);
     }
-  }, [appendAssistantMessage, commitProject, executeEditorHostTool, markQuickStart, pendingAssistantPlan, publishAssistantEvent]);
+  }, [appendAssistantMessage, commitGameProject, commitProject, executeEditorHostTool, markQuickStart, pendingAssistantPlan, publishAssistantEvent]);
 
   const discardPendingAssistantPlan = useCallback(() => {
     if (!pendingAssistantPlan) return;
@@ -1505,7 +1899,8 @@ export default function App() {
   useEffect(() => {
     assistantSnapshotRef.current = () => ({
       revision: projectRevisionRef.current,
-      project: cloneProject(projectRef.current),
+      project: structuredClone(gameProjectRef.current),
+      legacySceneProjection: cloneProject(projectRef.current),
       selectedId,
       mode: modeRef.current,
       viewport: { viewMode, tool, space, snap, gridVisible },
@@ -1516,8 +1911,69 @@ export default function App() {
     assistantRequestRef.current = async (request) => {
       const requestId = request.requestId ?? assistantId('request');
       const definition = getAgentToolDefinition(request.tool);
-      if (!definition) return { status: 'rejected', requestId, errors: [`Unknown agent tool "${request.tool}".`] };
       const args = request.arguments ?? {};
+      if (!definition) {
+        const gameDefinition = AGENT_GAME_CAPABILITY_MANIFEST.tools.find((entry) => entry.name === request.tool);
+        if (!gameDefinition) return { status: 'rejected', requestId, errors: [`Unknown agent tool "${request.tool}".`] };
+        const baseRevision = request.baseRevision ?? (typeof args.baseRevision === 'number' ? args.baseRevision : undefined);
+        if (baseRevision === undefined) return { status: 'rejected', requestId, errors: ['Game-authoring requests require baseRevision.'], currentRevision: projectRevisionRef.current };
+        const result = executeAgentGameTool(gameProjectRef.current, projectRevisionRef.current, request.tool, { ...args, baseRevision });
+        if (!result.ok) return { status: 'rejected', requestId, errors: result.errors, currentRevision: projectRevisionRef.current };
+        if (gameDefinition.approval === 'required') {
+          if (pendingAssistantPlanRef.current) {
+            return { status: 'rejected', requestId, errors: ['Review or discard the current proposal before creating another one.'] };
+          }
+          const assessment = assessAgentGameToolCall(request.tool);
+          const id = `proposal-${requestId}`;
+          const gameToolCall = {
+            name: gameDefinition.name,
+            arguments: structuredClone({ ...args, baseRevision }),
+          };
+          const destructive = gameDefinition.name === 'studio_delete_script'
+            || gameDefinition.name === 'studio_create_collect_escape';
+          const plan: PendingAssistantPlan = {
+            id,
+            title: gameDefinition.name === 'studio_create_collect_escape'
+              ? 'Create Collect & Escape game'
+              : gameDefinition.name === 'studio_delete_script'
+                ? 'Delete behavior script'
+                : 'Save behavior script',
+            description: gameDefinition.description,
+            baseRevision: projectRevisionRef.current,
+            source: 'bridge',
+            toolCalls: [gameToolCall],
+            gameResult: result,
+            calls: [{
+              name: gameDefinition.name,
+              title: gameDefinition.description,
+              effect: destructive ? 'destructive' : 'sensitive',
+              summary: result.history?.label ?? gameDefinition.description,
+              arguments: gameToolCall.arguments,
+              reviewNote: assessment.reasons.join(' '),
+            }],
+          };
+          pendingAssistantPlanRef.current = plan;
+          setPendingAssistantPlan(plan);
+          openAssistantPanel();
+          publishAssistantEvent({
+            type: 'proposal.created',
+            revision: plan.baseRevision,
+            proposalId: id,
+            label: plan.title,
+            actor: 'integration',
+          });
+          return {
+            status: 'approval_required',
+            requestId,
+            proposalId: id,
+            currentRevision: projectRevisionRef.current,
+            tool: gameDefinition.name,
+            rationale: gameDefinition.description,
+            preview: result.data,
+          };
+        }
+        return { status: 'complete', requestId, result };
+      }
       const errors = validateAgentToolArguments(request.tool, args);
       if (errors.length) return { status: 'rejected', requestId, errors };
       if (!definition.readOnly && request.baseRevision === undefined) {
@@ -1535,12 +1991,14 @@ export default function App() {
       });
       return { ...result, requestId };
     };
-  }, [assistantOpen, bottomOpen, bottomTab, experience, gridVisible, hierarchyOpen, inspectorOpen, prepareAssistantCalls, previewMode, redoStack.length, selectedId, snap, space, stats, tool, undoStack.length, viewMode]);
+  }, [assistantOpen, bottomOpen, bottomTab, experience, gridVisible, hierarchyOpen, inspectorOpen, openAssistantPanel, prepareAssistantCalls, previewMode, publishAssistantEvent, redoStack.length, selectedId, snap, space, stats, tool, undoStack.length, viewMode]);
 
   useEffect(() => {
     const bridge: ThreeJSStudioAgentBridge = {
-      apiVersion: 1,
-      manifest: () => structuredClone(AGENT_CAPABILITY_MANIFEST),
+      // V2 makes ProjectDocumentV5 authoritative in snapshot().project and
+      // moves the former V4 shape to snapshot().legacySceneProjection.
+      apiVersion: 2,
+      manifest: () => structuredClone({ ...AGENT_CAPABILITY_MANIFEST, authoritativeProjectSchemaVersion: 5, gameAuthoring: AGENT_GAME_CAPABILITY_MANIFEST }),
       snapshot: () => assistantSnapshotRef.current(),
       request: (request) => assistantRequestRef.current(request),
       subscribe: (listener) => {
@@ -1573,18 +2031,29 @@ export default function App() {
       data-testid="studio-app"
       data-experience={experience}
       data-step={quickStartStep}
-      data-runtime={mode === 'edit' ? 'edit' : 'playing'}
+      data-runtime={runtimePreparing ? 'preparing' : mode === 'edit' ? 'edit' : 'playing'}
     >
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark"><Boxes size={18} strokeWidth={1.8} /></span>
           <span className="brand-copy"><strong>ThreeJS</strong><span>Studio</span></span>
         </div>
-        <nav className="app-menu-bar" aria-label="Application menu">
+        <Menubar className="app-menu-bar h-auto border-0 max-[720px]:hidden" aria-label="Application menu">
           {visibleMenus.map((menu) => (
-            <button type="button" key={menu} className={openMenu === menu ? 'is-active' : ''} onClick={() => toggleMenu(menu)}>{menu[0].toUpperCase() + menu.slice(1)}</button>
+            <MenubarMenu
+              key={menu}
+              open={openMenu === menu}
+              onOpenChange={(open) => handleMenuOpenChange(menu, open)}
+            >
+              <MenubarTrigger className={openMenu === menu ? 'is-active' : ''}>
+                {menu[0].toUpperCase() + menu.slice(1)}
+              </MenubarTrigger>
+              <MenubarContent className={`app-menu-popover menu-${menu} !static !top-auto !left-auto`}>
+                {renderApplicationMenu(menu)}
+              </MenubarContent>
+            </MenubarMenu>
           ))}
-        </nav>
+        </Menubar>
         <div className="project-crumb">
           <span className={`save-state-dot ${dirty ? 'is-dirty' : ''}`} />
           <strong>{project.name}</strong>
@@ -1600,11 +2069,11 @@ export default function App() {
         <div className="play-controls" aria-label="Play controls">
           {experience === 'essentials' ? (
             mode === 'edit'
-              ? <button type="button" className="essential-play" onClick={startPlay} data-testid="play-button"><Play size={13} fill="currentColor" /> Play</button>
+              ? <button type="button" className="essential-play" onClick={startPlay} disabled={runtimePreparing} data-testid="play-button"><Play size={13} fill="currentColor" /> {runtimePreparing ? 'Preparing…' : 'Play'}</button>
               : <button type="button" className="essential-stop" onClick={stopPlay} data-testid="stop-button"><Square size={11} fill="currentColor" /> Stop</button>
           ) : (
             <>
-              <IconButton label="Play" active={mode === 'play'} disabled={mode !== 'edit'} onClick={startPlay} testId="play-button"><Play size={14} fill={mode === 'play' ? 'currentColor' : 'none'} /></IconButton>
+              <IconButton label={runtimePreparing ? 'Preparing game runtime' : 'Play'} active={mode === 'play'} disabled={mode !== 'edit' || runtimePreparing} onClick={startPlay} testId="play-button"><Play size={14} fill={mode === 'play' ? 'currentColor' : 'none'} /></IconButton>
               <IconButton label={mode === 'paused' ? 'Resume' : 'Pause'} active={mode === 'paused'} disabled={mode === 'edit'} onClick={togglePause} testId="pause-button"><Pause size={14} fill={mode === 'paused' ? 'currentColor' : 'none'} /></IconButton>
               <IconButton label="Step one frame" disabled={mode !== 'paused'} onClick={() => engineRef.current?.step()}><StepForward size={14} /></IconButton>
               <IconButton label="Stop" disabled={mode === 'edit'} onClick={stopPlay} testId="stop-button"><Square size={12} fill={mode !== 'edit' ? 'currentColor' : 'none'} /></IconButton>
@@ -1618,56 +2087,18 @@ export default function App() {
         <div className="topbar-actions">
           <span className="autosave-state"><Check size={12} />{dirty ? 'Saving…' : lastSaved}</span>
           {experience === 'advanced' ? <button type="button" className="secondary-action" onClick={enterPreview}><Globe2 size={14} /><span>Preview</span></button> : null}
-          <button type="button" className="primary-action" onClick={() => buildWebGame()} data-testid="build-button"><Rocket size={14} /><span>Build</span></button>
+          <button
+            type="button"
+            className="primary-action"
+            aria-label="Build offline web game"
+            onClick={() => buildWebGame()}
+            data-testid="build-button"
+          >
+            <Rocket size={14} />
+            <span>Build</span>
+          </button>
         </div>
       </header>
-
-      {openMenu ? <button type="button" className="menu-scrim" aria-label="Close menu" onClick={closeMenus} /> : null}
-      {openMenu === 'file' ? (
-        <div className="app-menu-popover menu-file">
-          <span className="menu-heading">Project</span>
-          <MenuItem icon={<Sparkles size={14} />} label="New starter project" shortcut="⌘N" disabled={editingDisabled} onClick={() => { resetStarter(); closeMenus(); }} />
-          <MenuItem icon={<FolderOpen size={14} />} label="Open project…" shortcut="⌘O" disabled={editingDisabled} onClick={() => { importInputRef.current?.click(); closeMenus(); }} />
-          <MenuItem icon={<Save size={14} />} label="Save" shortcut="⌘S" onClick={() => { saveProject(); closeMenus(); }} />
-          <div className="menu-separator" />
-          <MenuItem icon={<FileJson size={14} />} label="Export editable project" onClick={() => { exportProject(); closeMenus(); }} />
-          <MenuItem icon={<Rocket size={14} />} label="Build web game" shortcut="⌘B" onClick={() => { buildWebGame(); closeMenus(); }} />
-        </div>
-      ) : null}
-      {openMenu === 'edit' ? (
-        <div className="app-menu-popover menu-edit">
-          <MenuItem icon={<Undo2 size={14} />} label="Undo" shortcut="⌘Z" disabled={!undoStack.length || editingDisabled} onClick={() => { undo(); closeMenus(); }} />
-          <MenuItem icon={<Redo2 size={14} />} label="Redo" shortcut="⇧⌘Z" disabled={!redoStack.length || editingDisabled} onClick={() => { redo(); closeMenus(); }} />
-          <div className="menu-separator" />
-          <MenuItem icon={<Copy size={14} />} label="Duplicate" shortcut="⌘D" disabled={!selectedId || editingDisabled} onClick={() => { duplicateSelected(); closeMenus(); }} />
-          <MenuItem icon={<Trash2 size={14} />} label="Delete" shortcut="⌫" danger disabled={!selectedId || selectedId === 'scene-root' || editingDisabled} onClick={() => { deleteSelected(); closeMenus(); }} />
-        </div>
-      ) : null}
-      {openMenu === 'object' ? (
-        <div className="app-menu-popover menu-object">
-          <MenuItem icon={<Layers3 size={14} />} label="Empty Group" disabled={editingDisabled} onClick={() => { createEmptyGroup(); closeMenus(); }} />
-          <div className="menu-separator" />
-          <span className="menu-heading">3D Object</span>
-          {primitives.map((primitive) => <MenuItem key={primitive} icon={<PrimitiveIcon primitive={primitive} />} label={primitiveLabel(primitive)} disabled={editingDisabled} onClick={() => { createPrimitive(primitive); closeMenus(); }} />)}
-        </div>
-      ) : null}
-      {openMenu === 'window' ? (
-        <div className="app-menu-popover menu-window">
-          <MenuItem icon={<PanelLeftOpen size={14} />} label={`${hierarchyOpen ? 'Hide' : 'Show'} Hierarchy`} shortcut="⌘1" onClick={() => { setHierarchyOpen((open) => !open); closeMenus(); }} />
-          <MenuItem icon={<PanelRightOpen size={14} />} label={`${inspectorOpen ? 'Hide' : 'Show'} Inspector`} shortcut="⌘2" onClick={() => { setInspectorOpen((open) => !open); closeMenus(); }} />
-          <MenuItem icon={<PanelBottomOpen size={14} />} label={`${bottomOpen ? 'Hide' : 'Show'} Project`} shortcut="⌘3" onClick={() => { setBottomOpen((open) => !open); closeMenus(); }} />
-          <div className="menu-separator" />
-          <MenuItem icon={<Command size={14} />} label="Command palette" shortcut="⌘K" onClick={() => { setCommandPaletteOpen(true); closeMenus(); }} />
-        </div>
-      ) : null}
-      {openMenu === 'help' ? (
-        <div className="app-menu-popover menu-help">
-          <span className="menu-heading">ThreeJS Studio</span>
-          <MenuItem icon={<Sparkles size={14} />} label="Resume Quick Start" onClick={() => { setQuickStart((current) => ({ ...current, dismissed: false })); changeExperience('essentials'); closeMenus(); }} />
-          <MenuItem icon={<Command size={14} />} label="Keyboard shortcuts" onClick={() => { setCommandPaletteOpen(true); closeMenus(); }} />
-          <MenuItem icon={<Globe2 size={14} />} label="About this build" onClick={() => { showToast('ThreeJS Studio · threejs.studio · Editor foundation v0.2'); closeMenus(); }} />
-        </div>
-      ) : null}
 
       <div className="workbench">
         <nav className="activity-rail" aria-label="Editor panels">
@@ -1675,10 +2106,11 @@ export default function App() {
           <IconButton label="Scene hierarchy" active={hierarchyOpen} onClick={() => setHierarchyOpen((open) => { const next = !open; if (next && window.innerWidth <= 960) setAssistantOpen(false); return next; })}><Layers3 size={16} /></IconButton>
           {experience === 'advanced' ? <IconButton label="Project assets" active={bottomOpen && bottomTab === 'assets'} onClick={() => { setBottomOpen(true); setBottomTab('assets'); if (window.innerWidth <= 960) setAssistantOpen(false); }}><Package size={16} /></IconButton> : null}
           {experience === 'advanced' ? <IconButton label="Console" active={bottomOpen && bottomTab === 'console'} onClick={() => { setBottomOpen(true); setBottomTab('console'); if (window.innerWidth <= 960) setAssistantOpen(false); }}><Terminal size={16} /></IconButton> : null}
+          {experience === 'advanced' ? <IconButton label="Game authoring" active={gameAuthoringOpen} onClick={() => { setGameAuthoringOpen((open) => !open); setAssistantOpen(false); }}><FileCode2 size={16} /></IconButton> : null}
           <IconButton label="Inspector" active={inspectorOpen && !assistantOpen} onClick={() => setInspectorOpen((open) => { const next = !open || assistantOpen; if (next) setAssistantOpen(false); return next; })}><SlidersHorizontal size={16} /></IconButton>
           <IconButton label={pendingAssistantPlan && !assistantOpen ? 'Studio Assistant · proposal awaiting review' : 'Studio Assistant'} active={assistantOpen} onClick={() => assistantOpen ? closeAssistantPanel() : openAssistantPanel()} testId="assistant-toggle"><span className="agent-trigger-icon"><Sparkles size={16} />{pendingAssistantPlan && !assistantOpen ? <i aria-hidden="true" /> : null}</span></IconButton>
           <span className="activity-spacer" />
-          {experience === 'advanced' ? <IconButton label="Command palette" onClick={() => setCommandPaletteOpen(true)}><Command size={16} /></IconButton> : null}
+          {experience === 'advanced' ? <IconButton label="Command palette" onClick={openCommandPalette}><Command size={16} /></IconButton> : null}
           <IconButton label="World settings" onClick={() => { setSelectedId('scene-root'); setInspectorOpen(true); setAssistantOpen(false); }}><Settings2 size={16} /></IconButton>
         </nav>
 
@@ -1706,10 +2138,16 @@ export default function App() {
         ) : null}
 
         <main className="workspace-main">
+          <div
+            className={`workspace-editor-surface ${gameAuthoringOpen ? 'is-covered' : ''}`}
+            aria-hidden={gameAuthoringOpen || undefined}
+            inert={gameAuthoringOpen || undefined}
+          >
+            <>
           <section className={`viewport-shell ${mode !== 'edit' ? 'is-running' : ''}`} aria-label="3D viewport">
             <div className="viewport-toolbar">
               <div className="toolbar-group add-object-wrap">
-                <button type="button" className="toolbar-add" disabled={editingDisabled} onClick={() => setAddMenuOpen((open) => !open)} data-testid="add-object"><Plus size={14} /><span>Create</span><ChevronDown size={11} /></button>
+                <button type="button" className="toolbar-add" aria-label="Create object" disabled={editingDisabled} onClick={() => setAddMenuOpen((open) => !open)} data-testid="add-object"><Plus size={14} /><span>Create</span><ChevronDown size={11} /></button>
                 {addMenuOpen ? (
                   <div className="viewport-add-menu">
                     <span>From file</span>
@@ -1791,7 +2229,7 @@ export default function App() {
                   <div className="quick-start-progress" aria-hidden="true"><i className={quickStart.added ? 'is-done' : 'is-current'} /><i className={quickStart.styled ? 'is-done' : quickStart.added ? 'is-current' : ''} /><i className={quickStart.played ? 'is-done' : quickStart.styled ? 'is-current' : ''} /></div>
                   {quickStartStep === 'add' ? <><strong>Add your first object</strong><p>Start with a shape or bring in a self-contained GLB model.</p><button type="button" className="quick-start-action" onClick={() => setAddMenuOpen(true)}>Choose a shape</button><button type="button" className="quick-start-secondary" onClick={() => openModelPicker()}>Import a 3D model</button></> : null}
                   {quickStartStep === 'style' ? selectedNode?.kind === 'model' ? <><strong>Place your model</strong><p>Use Transform or Sizing in Details to fit the model into your world.</p><button type="button" className="quick-start-action" onClick={() => setInspectorOpen(true)}>Open model controls</button></> : <><strong>Make it yours</strong><p>Use Appearance in Details to change the selected shape’s color.</p><button type="button" className="quick-start-action" onClick={() => setInspectorOpen(true)}>Open color controls</button></> : null}
-                  {quickStartStep === 'play' ? <><strong>Try your game</strong><p>Play runs every Motion component without changing your authored scene.</p><button type="button" className="quick-start-action" onClick={startPlay}><Play size={12} fill="currentColor" /> Play the game</button></> : null}
+                  {quickStartStep === 'play' ? <><strong>Try your game</strong><p>Play runs every Motion component without changing your authored scene.</p><button type="button" className="quick-start-action" disabled={runtimePreparing} onClick={startPlay}><Play size={12} fill="currentColor" /> {runtimePreparing ? 'Preparing…' : 'Play the game'}</button></> : null}
                   {quickStartStep === 'complete' ? <><strong>Your first scene works</strong><p>Keep editing, switch to Advanced, or build a standalone web game.</p><button type="button" className="quick-start-action" onClick={() => buildWebGame()}><Rocket size={12} /> Build web game</button><button type="button" className="quick-start-secondary" onClick={() => setQuickStart((current) => ({ ...current, dismissed: true }))}>Continue editing</button></> : null}
                 </section>
               ) : null}
@@ -1812,26 +2250,41 @@ export default function App() {
               onClose={() => setBottomOpen(false)}
             />
           ) : null}
+            </>
+          </div>
+          {gameAuthoringOpen ? (
+            <div className="game-authoring-layer">
+              <GameAuthoringWorkspace
+                project={gameProjectRef.current}
+                revision={projectRevision}
+                readOnly={editingDisabled}
+                onCommitProject={commitGameProject}
+                onBuild={buildWebGame}
+                onPlay={startPlay}
+                onClose={() => setGameAuthoringOpen(false)}
+              />
+            </div>
+          ) : null}
         </main>
 
         {assistantOpen ? (
           <AgentPanel
             open
             experience={experience}
-            capabilityCount={AGENT_CAPABILITY_MANIFEST.tools.length}
+            capabilityCount={AGENT_CAPABILITY_MANIFEST.tools.length + AGENT_GAME_CAPABILITY_MANIFEST.tools.length}
             revision={projectRevision}
             sceneName={project.sceneName}
             selectedName={selectedNode?.name}
             messages={assistantMessages}
             pendingPlan={pendingAssistantPlan}
             busy={assistantBusy}
-            canApply={Boolean(pendingAssistantPlan && pendingAssistantPlan.baseRevision === projectRevision && (!pendingAssistantPlan.batch || mode === 'edit'))}
+            canApply={Boolean(pendingAssistantPlan && pendingAssistantPlan.baseRevision === projectRevision && (!(pendingAssistantPlan.batch || pendingAssistantPlan.gameResult?.changed) || mode === 'edit'))}
             applyBlockedReason={pendingAssistantPlan?.baseRevision !== projectRevision
               ? 'The project changed after this proposal was prepared. Discard it and request an updated plan.'
-              : pendingAssistantPlan?.batch && mode !== 'edit'
+              : (pendingAssistantPlan?.batch || pendingAssistantPlan?.gameResult?.changed) && mode !== 'edit'
                 ? 'Stop Play mode before applying authored scene changes.'
                 : undefined}
-            applyBlockedReasonCode={pendingAssistantPlan?.baseRevision !== projectRevision ? 'stale' : pendingAssistantPlan?.batch && mode !== 'edit' ? 'play' : undefined}
+            applyBlockedReasonCode={pendingAssistantPlan?.baseRevision !== projectRevision ? 'stale' : (pendingAssistantPlan?.batch || pendingAssistantPlan?.gameResult?.changed) && mode !== 'edit' ? 'play' : undefined}
             canUndoLast={canUndoLastAssistantPlan}
             onClose={closeAssistantPanel}
             onSubmit={submitAssistantPrompt}
@@ -1855,23 +2308,74 @@ export default function App() {
         </div>
       ) : null}
 
-      {commandPaletteOpen ? (
-        <div className="command-backdrop" role="presentation" onMouseDown={() => setCommandPaletteOpen(false)}>
-          <section className="command-palette" role="dialog" aria-modal="true" aria-label="Command palette" onMouseDown={(event) => event.stopPropagation()}>
-            <label className="command-search"><Command size={17} /><input autoFocus value={commandQuery} onChange={(event) => setCommandQuery(event.target.value)} placeholder="Type a command or search…" onKeyDown={(event) => {
-              if (event.key === 'ArrowDown') { event.preventDefault(); setCommandIndex((index) => filteredCommands.length ? (index + 1) % filteredCommands.length : 0); }
-              if (event.key === 'ArrowUp') { event.preventDefault(); setCommandIndex((index) => filteredCommands.length ? (index - 1 + filteredCommands.length) % filteredCommands.length : 0); }
-              if (event.key === 'Enter' && filteredCommands[commandIndex]) runCommand(filteredCommands[commandIndex]);
-              if (event.key === 'Escape') setCommandPaletteOpen(false);
-            }} /><kbd>Esc</kbd></label>
-            <div className="command-list">
-              {filteredCommands.map((action, index) => <button type="button" key={action.id} className={index === commandIndex ? 'is-highlighted' : ''} disabled={action.disabled} aria-current={index === commandIndex ? 'true' : undefined} onMouseEnter={() => setCommandIndex(index)} onClick={() => runCommand(action)}><span className="command-icon">{action.icon}</span><span><strong>{action.label}</strong><small>{action.group}</small></span>{action.shortcut ? <kbd>{action.shortcut}</kbd> : null}</button>)}
-              {filteredCommands.length === 0 ? <div className="command-empty"><Command size={22} /><span>No commands found</span></div> : null}
+      <Dialog
+        open={commandPaletteOpen}
+        onOpenChange={(open) => {
+          setCommandPaletteOpen(open);
+          if (!open) setCommandQuery('');
+        }}
+      >
+        <DialogContent
+          className="command-backdrop !max-w-none !translate-x-0 !translate-y-0 !gap-0 !rounded-none !ring-0"
+          showCloseButton={false}
+          finalFocus={() => commandPaletteReturnFocusRef.current}
+          aria-label="Command palette"
+          style={{
+            top: 0,
+            right: 0,
+            bottom: 0,
+            left: 0,
+            display: 'flex',
+            width: 'auto',
+            maxWidth: 'none',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: 'max(10vh, 70px) 0 0',
+            background: 'rgba(4, 7, 11, 0.62)',
+            backdropFilter: 'blur(5px)',
+            transform: 'none',
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setCommandPaletteOpen(false);
+          }}
+        >
+          <DialogTitle className="sr-only">Command palette</DialogTitle>
+          <CommandMenu
+            className="command-palette !h-auto"
+            style={{ width: 'min(560px, calc(100vw - 28px))' }}
+            shouldFilter={false}
+            loop
+          >
+            <div className="command-search [&_[data-slot=input-group-addon]]:hidden">
+              <Command size={17} />
+              <CommandInput
+                autoFocus
+                value={commandQuery}
+                onValueChange={setCommandQuery}
+                placeholder="Type a command or search…"
+              />
+              <kbd>Esc</kbd>
             </div>
+            <CommandList className="command-list max-h-[360px]">
+              {filteredCommands.map((action) => (
+                <CommandItem
+                  key={action.id}
+                  value={action.label}
+                  disabled={action.disabled}
+                  className="!grid min-h-[42px] !grid-cols-[31px_1fr_auto] gap-2 rounded-[6px] px-[9px] py-1 [&>svg:last-child]:hidden"
+                  onSelect={() => runCommand(action)}
+                >
+                  <span className="command-icon">{action.icon}</span>
+                  <span className="flex min-w-0 flex-col gap-0.5"><strong>{action.label}</strong><small>{action.group}</small></span>
+                  {action.shortcut ? <CommandShortcut><kbd>{action.shortcut}</kbd></CommandShortcut> : null}
+                </CommandItem>
+              ))}
+              <CommandEmpty className="command-empty"><Command size={22} /><span>No commands found</span></CommandEmpty>
+            </CommandList>
             <footer><span><kbd>↵</kbd> Run</span><span><kbd>↑↓</kbd> Navigate</span><span><kbd>Esc</kbd> Close</span></footer>
-          </section>
-        </div>
-      ) : null}
+          </CommandMenu>
+        </DialogContent>
+      </Dialog>
 
       {toast ? <div className="toast" role="status"><span className="toast-icon"><Check size={13} /></span><span>{toast}</span><button type="button" aria-label="Dismiss notification" onClick={() => setToast(null)}><X size={13} /></button></div> : null}
 

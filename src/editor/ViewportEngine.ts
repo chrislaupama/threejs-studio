@@ -12,11 +12,21 @@ import type {
   ModelAssetRecord,
   PrimitiveType,
   ProjectDocument,
+  ProjectDocumentV5,
   RendererStats,
   SceneNode,
   TransformData,
   ViewMode,
 } from './types';
+import { RuntimeSession } from '../runtime/RuntimeSession';
+import {
+  createProjectGameRuntime,
+  detectProjectRuntimeBindings,
+  type ProjectGameRuntimeController,
+  type ProjectGameRuntimeDiagnostics,
+  type ProjectGameRuntimeHUDSnapshot,
+  type ProjectGameRuntimeSnapshot,
+} from '../runtime/ProjectGameRuntime';
 
 interface ViewportCallbacks {
   onSelect: (id: string | null) => void;
@@ -118,7 +128,13 @@ export class ViewportEngine {
   private pointerDownAt = { x: 0, y: 0 };
   private runtimeTime = 0;
   private runtimeTick = 0;
-  private stepRequested = false;
+  private runtimeSession: RuntimeSession | null = null;
+  private gameRuntime: ProjectGameRuntimeController | null = null;
+  private gameRuntimeSnapshot: ProjectGameRuntimeSnapshot | null = null;
+  private gameRuntimeDiagnostics: ProjectGameRuntimeDiagnostics | null = null;
+  private gameRuntimeHUD: ProjectGameRuntimeHUDSnapshot | null = null;
+  private gameRuntimeInputCodes = new Set<string>();
+  private gameRuntimePreparation = 0;
   private readonly pressedCodes = new Set<string>();
   private boundInputCodes = new Set<string>();
   private frames = 0;
@@ -198,7 +214,10 @@ export class ViewportEngine {
     });
 
     this.canvas.addEventListener('pointerdown', this.onPointerDown);
+    this.canvas.addEventListener('pointermove', this.onPointerMove);
     this.canvas.addEventListener('pointerup', this.onPointerUp);
+    this.canvas.addEventListener('pointercancel', this.onPointerCancel);
+    this.canvas.addEventListener('wheel', this.onWheel, { passive: false });
     this.canvas.addEventListener('dblclick', this.onDoubleClick);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
@@ -243,13 +262,42 @@ export class ViewportEngine {
 
   private readonly onPointerDown = (event: PointerEvent) => {
     this.pointerDownAt = { x: event.clientX, y: event.clientY };
+    if (this.mode !== 'play' || !this.gameRuntime) return;
+    this.gameRuntime.setPointerPosition(event.clientX, event.clientY);
+    this.gameRuntime.setPointerButton(event.button, true);
+    if (event.pointerType === 'touch') this.gameRuntime.setTouch(event.pointerId, event.clientX, event.clientY);
+  };
+
+  private readonly onPointerMove = (event: PointerEvent) => {
+    if (this.mode !== 'play' || !this.gameRuntime) return;
+    this.gameRuntime.setPointerPosition(event.clientX, event.clientY);
+    this.gameRuntime.addPointerDelta(event.movementX, event.movementY);
+    if (event.pointerType === 'touch') this.gameRuntime.setTouch(event.pointerId, event.clientX, event.clientY);
   };
 
   private readonly onPointerUp = (event: PointerEvent) => {
+    if (this.mode === 'play' && this.gameRuntime) {
+      this.gameRuntime.setPointerPosition(event.clientX, event.clientY);
+      this.gameRuntime.setPointerButton(event.button, false);
+      if (event.pointerType === 'touch') this.gameRuntime.removeTouch(event.pointerId);
+      return;
+    }
     if (this.mode !== 'edit' || this.viewMode !== 'scene' || this.transformControls.dragging) return;
     const distance = Math.hypot(event.clientX - this.pointerDownAt.x, event.clientY - this.pointerDownAt.y);
     if (distance > 5) return;
     this.pick(event);
+  };
+
+  private readonly onPointerCancel = (event: PointerEvent) => {
+    if (!this.gameRuntime) return;
+    if (event.button >= 0) this.gameRuntime.setPointerButton(event.button, false);
+    if (event.pointerType === 'touch') this.gameRuntime.removeTouch(event.pointerId);
+  };
+
+  private readonly onWheel = (event: WheelEvent) => {
+    if (this.mode !== 'play' || !this.gameRuntime) return;
+    this.gameRuntime.addWheelDelta(event.deltaX, event.deltaY);
+    event.preventDefault();
   };
 
   private readonly onDoubleClick = () => {
@@ -263,16 +311,23 @@ export class ViewportEngine {
       isInputShortcutChord(event) ||
       (target instanceof HTMLElement && (target.isContentEditable || target.matches('input, textarea, select')))
     ) return;
-    if (!this.boundInputCodes.has(event.code)) return;
+    const legacyInput = this.boundInputCodes.has(event.code);
+    const gameInput = this.gameRuntimeInputCodes.has(event.code);
+    if (!legacyInput && !gameInput) return;
+    if (gameInput) this.gameRuntime?.setKeyboardKey(event.code, true);
     this.pressedCodes.add(event.code);
     event.preventDefault();
   };
 
   private readonly onKeyUp = (event: KeyboardEvent) => {
+    if (this.gameRuntimeInputCodes.has(event.code)) this.gameRuntime?.setKeyboardKey(event.code, false);
     this.pressedCodes.delete(event.code);
   };
 
   private readonly onWindowBlur = () => {
+    for (const code of this.pressedCodes) {
+      if (this.gameRuntimeInputCodes.has(code)) this.gameRuntime?.setKeyboardKey(code, false);
+    }
     this.pressedCodes.clear();
   };
 
@@ -685,10 +740,92 @@ export class ViewportEngine {
     this.grid.visible = visible && this.mode === 'edit' && this.viewMode === 'scene';
   }
 
+  /**
+   * Prepare the disposable schema-v5 runtime before changing editor mode. Rapier
+   * initialization is asynchronous, while RuntimeSession lifecycle hooks stay
+   * deterministic and synchronous once Play begins.
+   */
+  async prepareGameRuntime(project: ProjectDocumentV5): Promise<boolean> {
+    if (this.disposed) throw new Error('The viewport has been disposed.');
+    if (this.mode !== 'edit') throw new Error('Game runtime preparation requires Edit mode.');
+    const preparation = ++this.gameRuntimePreparation;
+    this.disposeGameRuntime();
+    const detected = detectProjectRuntimeBindings(project);
+    if (!detected) return false;
+
+    const inputCodes = new Set<string>();
+    for (const action of detected.manifest.input.actions) {
+      for (const binding of action.bindings) {
+        if (binding.device === 'keyboard') inputCodes.add(binding.code);
+      }
+    }
+    const hudTarget = this.canvas.parentElement ?? undefined;
+    const runtime = await createProjectGameRuntime({
+      project,
+      host: {
+        ...(hudTarget ? { hudTarget } : {}),
+        touchAvailable: navigator.maxTouchPoints > 0 || window.matchMedia('(pointer: coarse)').matches,
+        setEntityTransform: (update) => {
+          const object = this.objects.get(update.entityId);
+          if (!object) return;
+          object.position.fromArray(update.position);
+          object.quaternion.fromArray(update.rotation);
+          const authoredVisible = this.document?.nodes.find((node) => node.id === update.entityId)?.visible ?? true;
+          object.visible = update.active && authoredVisible;
+        },
+        setEntityActive: (entityId, active) => {
+          const object = this.objects.get(entityId);
+          if (!object) return;
+          const authoredVisible = this.document?.nodes.find((node) => node.id === entityId)?.visible ?? true;
+          object.visible = active && authoredVisible;
+        },
+        onHUDChange: (hud) => {
+          this.gameRuntimeHUD = structuredClone(hud);
+        },
+        getGamepads: () => {
+          if (typeof navigator.getGamepads !== 'function') return [];
+          return [...navigator.getGamepads()].flatMap((gamepad) => gamepad ? [{
+            index: gamepad.index,
+            connected: gamepad.connected,
+            buttons: gamepad.buttons.map((button) => button.value),
+            axes: [...gamepad.axes],
+          }] : []);
+        },
+      },
+    });
+    if (preparation !== this.gameRuntimePreparation || this.disposed || this.mode !== 'edit') {
+      runtime?.dispose();
+      return false;
+    }
+    if (!runtime) return false;
+    this.gameRuntime = runtime;
+    this.gameRuntimeInputCodes = inputCodes;
+    this.gameRuntimeSnapshot = runtime.getSnapshot();
+    this.gameRuntimeDiagnostics = runtime.getDiagnostics();
+    return true;
+  }
+
+  cancelPreparedGameRuntime() {
+    this.gameRuntimePreparation += 1;
+    this.disposeGameRuntime();
+  }
+
+  private disposeGameRuntime() {
+    this.gameRuntime?.dispose();
+    this.gameRuntime = null;
+    this.gameRuntimeSnapshot = null;
+    this.gameRuntimeDiagnostics = null;
+    this.gameRuntimeHUD = null;
+    this.gameRuntimeInputCodes.clear();
+  }
+
   setMode(mode: EditorMode) {
     const previousMode = this.mode;
     this.mode = mode;
     if (mode === 'edit') {
+      this.runtimeSession?.dispose();
+      this.runtimeSession = null;
+      this.disposeGameRuntime();
       this.runtimeTime = 0;
       this.runtimeTick = 0;
       if (this.document) this.setDocument(this.document);
@@ -696,9 +833,63 @@ export class ViewportEngine {
       this.runtimeTime = 0;
       this.runtimeTick = 0;
       if (this.document) this.setDocument(this.document);
+      this.runtimeSession?.dispose();
+      const preparedGameRuntime = this.gameRuntime;
+      this.runtimeSession = new RuntimeSession({
+        identity: {
+          sessionId: `editor-preview-${Date.now()}`,
+          revision: 0,
+          buildHash: 'editor-preview',
+        },
+        systems: preparedGameRuntime ? [{
+          id: 'schema-v5-project-runtime',
+          stage: 'game-state',
+          initialize: () => {
+            this.gameRuntimeSnapshot = preparedGameRuntime.start();
+            this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+          },
+          fixedUpdate: (context) => {
+            this.runtimeTime = context.simulationTimeSeconds;
+            this.runtimeTick = context.tick;
+            if (context.source === 'manual-step' && preparedGameRuntime.status === 'paused') {
+              preparedGameRuntime.resume();
+              preparedGameRuntime.fixedUpdate(context.fixedDeltaSeconds);
+              this.gameRuntimeSnapshot = preparedGameRuntime.pause();
+            } else {
+              this.gameRuntimeSnapshot = preparedGameRuntime.fixedUpdate(context.fixedDeltaSeconds);
+            }
+            this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+          },
+          pause: () => {
+            this.gameRuntimeSnapshot = preparedGameRuntime.pause();
+            this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+          },
+          resume: () => {
+            this.gameRuntimeSnapshot = preparedGameRuntime.resume();
+            this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+          },
+          restart: () => {
+            this.gameRuntimeSnapshot = preparedGameRuntime.restart();
+            this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+          },
+          dispose: () => preparedGameRuntime.dispose(),
+        }] : [{
+          id: 'legacy-gameplay-components',
+          stage: 'scripts-graphs',
+          fixedUpdate: (context) => this.applyRuntimeFixedUpdate(
+            context.fixedDeltaSeconds,
+            context.simulationTimeSeconds,
+            context.tick,
+          ),
+        }],
+      });
+      this.runtimeSession.start();
+    } else if (mode === 'paused' && previousMode === 'play') {
+      this.runtimeSession?.pause();
+    } else if (mode === 'play' && previousMode === 'paused') {
+      this.runtimeSession?.resume();
     }
     if (mode !== 'play') this.onWindowBlur();
-    this.stepRequested = false;
     this.updateEditorVisibility();
     this.syncSelection();
   }
@@ -721,7 +912,10 @@ export class ViewportEngine {
   }
 
   step() {
-    if (this.mode === 'paused') this.stepRequested = true;
+    if (this.mode !== 'paused' || !this.runtimeSession) return;
+    const diagnostics = this.runtimeSession.step();
+    this.runtimeTime = diagnostics.simulationTimeSeconds;
+    this.runtimeTick = diagnostics.tick;
   }
 
   frameSelection() {
@@ -765,16 +959,9 @@ export class ViewportEngine {
     return fallback;
   }
 
-  private updateRuntime(delta: number) {
-    if (this.mode === 'edit') return;
-    let simulationDelta = delta;
-    if (this.mode === 'paused') {
-      if (!this.stepRequested) return;
-      simulationDelta = 1 / 60;
-    }
-    this.stepRequested = false;
-    this.runtimeTime += simulationDelta;
-    this.runtimeTick += 1;
+  private applyRuntimeFixedUpdate(simulationDelta: number, simulationTime: number, tick: number) {
+    this.runtimeTime = simulationTime;
+    this.runtimeTick = tick;
     for (const root of this.objects.values()) {
       const components = root.userData.components as GameplayComponent[] | undefined;
       const basePosition = root.userData.basePosition as TransformData['position'];
@@ -811,6 +998,13 @@ export class ViewportEngine {
         }
       }
     }
+  }
+
+  private updateRuntime(delta: number) {
+    if (this.mode === 'edit' || !this.runtimeSession) return;
+    const diagnostics = this.runtimeSession.advance(delta);
+    this.runtimeTime = diagnostics.simulationTimeSeconds;
+    this.runtimeTick = diagnostics.tick;
   }
 
   private readonly render = (time: number) => {
@@ -888,6 +1082,13 @@ export class ViewportEngine {
             rotation: [object.rotation.x, object.rotation.y, object.rotation.z],
             scale: object.scale.toArray(),
           }])),
+          ...(this.gameRuntimeSnapshot ? {
+            game: {
+              snapshot: structuredClone(this.gameRuntimeSnapshot),
+              diagnostics: structuredClone(this.gameRuntimeDiagnostics),
+              hud: structuredClone(this.gameRuntimeHUD),
+            },
+          } : {}),
         },
       };
       window.__THREEJS_STUDIO_DIAGNOSTICS__ = diagnostics;
@@ -900,10 +1101,17 @@ export class ViewportEngine {
 
   dispose() {
     this.disposed = true;
+    this.gameRuntimePreparation += 1;
+    this.runtimeSession?.dispose();
+    this.runtimeSession = null;
+    this.disposeGameRuntime();
     this.renderer.setAnimationLoop(null);
     this.resizeObserver.disconnect();
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
+    this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.canvas.removeEventListener('pointerup', this.onPointerUp);
+    this.canvas.removeEventListener('pointercancel', this.onPointerCancel);
+    this.canvas.removeEventListener('wheel', this.onWheel);
     this.canvas.removeEventListener('dblclick', this.onDoubleClick);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);

@@ -2,170 +2,231 @@
 
 ## Product vision
 
-Build a professional game-authoring environment that runs in a browser and exports standard Three.js games. The editor should feel familiar to Unity and Unreal users without copying either product: scene-first workflow, direct manipulation, component-based authoring, fast play iteration, transparent web output, and a data format developers can own.
+Build a professional, web-first game-development environment that feels familiar to users of Godot, Unity, and Unreal while producing transparent Three.js projects and offline web builds.
 
-The core promise is:
+The product promise is:
 
-> Build the scene visually, add reusable game behavior, press Play instantly, and export a normal web game.
+> Build scenes visually, program reusable behavior, press Play instantly, and export the same game runtime without editor-only repair.
 
 ## Product principles
 
-1. **The project document is authoritative.** Editor and runtime scenes are derived views, never save-state containers.
-2. **Preview and export share a runtime loader.** A game cannot behave differently merely because it left the editor.
-3. **Direct manipulation first.** Common authoring should happen through the viewport, hierarchy, inspector, and assets—not raw JSON.
-4. **Web-native output.** glTF, TypeScript/JavaScript, Web Audio, browser input, and static hosting remain visible and portable.
-5. **Safe extension points.** User code runs behind a Worker or sandboxed-frame boundary, not in the editor origin.
-6. **Performance is inspectable.** Draw calls, triangles, textures, frame time, and runtime ownership stay visible.
-7. **Honest milestones.** A control ships when its workflow works end to end.
-8. **Human/AI authoring parity.** Every durable human authoring control must have a typed, validated capability over the same project operation; neither agents nor integrations receive direct React, DOM, renderer, or `Object3D` access.
+1. `ProjectDocumentV5` is authoritative; editor and runtime objects are derived.
+2. Human and typed AI authoring use the same validated, revision-checked project operations.
+3. Play, Preview, tests, and exported games converge on one runtime.
+4. User code compiles outside the UI thread and executes outside the editor origin.
+5. Runtime/save-game state never mutates authored project data.
+6. Web output remains inspectable, portable, and hostable without vendor lock-in.
+7. Accessibility, lifecycle cleanup, diagnostics, and performance are release gates.
+8. A feature is complete only when its author → play → save/reopen → export path works.
 
-## Milestone 1 — Editor foundation (implemented)
+## Status legend
 
-- React + TypeScript editor shell around a direct Three.js viewport.
-- Versioned, validated schema-v4 project format with sequential schema-v1 behavior → schema-v2 component → schema-v3 asset-catalog → schema-v4 Input Actions migration.
-- Starter scene with meshes, lights, camera, materials, world settings, and stackable gameplay components.
-- Essentials and Advanced authoring experiences over one shared project, with a persisted real-action Quick Start journey.
-- Hierarchy, picking, transform gizmos, inspector, built-in assets, and scene/game tabs.
-- Command history for create, edit, duplicate, delete, visibility, materials, and transforms.
-- Strict edit/play isolation, pause/fixed-step/stop, clean preview, local autosave, and validated JSON round-trip.
-- Spin, Float, and Keyboard Move components that compose in editor Play mode and the standalone HTML runtime.
-- Standalone HTML web build for primitive scenes and built-in gameplay components.
-- Responsive editor states, desktop/mobile smoke tests, and screenshot baselines.
+- **Integrated** — used by the mounted editor workflow.
+- **Partial** — an integrated slice exists, but the complete domain is not end-to-end.
+- **Foundation** — implemented as a contract/module with focused coverage, not yet a complete product surface.
+- **Planned** — not yet implemented.
 
-Success metric: a new user can follow Add → Style → Play → Build without knowing Three.js terminology, while an advanced user can stack and tune components, inspect renderer state, save/reload stable IDs, and export a runnable page.
+## Current checkpoint
 
-## Milestone 2 — Asset and prefab pipeline (model slice implemented)
+Schema v5 is now the durable project format. The existing Hierarchy, Inspector, assets, and viewport remain operational through a schema-v4 active-scene projection that merges edits back into v5. This prevents the UI migration from blocking persistence while preserving v5-only data.
 
-- Revisioned IndexedDB model storage with binary records separated from schema-v4 project metadata. **Implemented.**
-- Self-contained GLB/embedded-resource glTF import with fit/original sizing, bounds, animation-name, triangle, material, texture, and file-size diagnostics. **Implemented.**
-- Shared parsed-model cache, SkeletonUtils instances, reference counting, stale-load guards, explicit GPU disposal, and visible loading/missing/error recovery. **Implemented.**
-- Novice Create/import/reuse/relink flow plus Advanced Models catalog and technical diagnostics. **Implemented.**
-- Portable editable JSON package with embedded model sources and single-HTML online builds with referenced models embedded. **Implemented.**
-- Whole-project IndexedDB document storage with idle autosave and quota management.
-- PNG, JPEG, WebP, HDR/EXR, and audio import with thumbnails and load/error states.
-- Drag a model into the viewport; drag a material/texture onto a mesh.
-- Prefab creation, nested prefab instances, overrides, and missing-reference recovery.
-- Editable `.tjsstudio` ZIP package with `manifest.json`, project data, and assets.
-- Draco, Meshopt, KTX2, and multi-file glTF package ingestion with configured decoders and dependency mapping.
+The checkpoint also includes the shadcn/Base UI foundation, a mounted Game Authoring workspace, validated script-source authoring, typed v5 game tools, an additive secure preview host, generalized game systems, a deterministic offline ZIP command, and a complete authored Collect & Escape template.
 
-Current model-slice result: an imported GLB survives save/reload, instantiates multiple times without duplicate geometry/texture ownership, recovers from missing local bytes, round-trips through an editable package, and appears in the online single-HTML build. Milestone completion still requires the offline ZIP, general media assets, drag/drop, and prefab system.
+Collect & Escape now runs through a versioned manifest adapter in editor Play and through an equivalent specialized adapter in the offline ZIP. Both cover movement, Rapier collision/sensors, pickups, score/countdown, exit win/fail/restart, HUD/touch controls, and cleanup. It is still a partial vertical slice: the authored TypeScript bundle is packaged but not executed, Play and export use separate implementations, and current Play is not hosted in the opaque iframe.
 
-Verified slice limits: imports are capped at 100 MiB and must be self-contained; editable packages currently use in-memory base64 JSON; imported animation clips are cataloged but not yet playable; repeated models share GPU resources but are not automatically batched into instanced draw calls.
+## Phase 0 — Shadcn/Base UI editor foundation
 
-## AI-native authoring foundation (registry/proposal/bridge slice implemented)
+### Integrated
 
-- Versioned `threejs-studio.authoring` capability manifest with JSON-compatible input schemas, stable namespaced tools, declared scope metadata, read/write effects, risk levels, reversibility, and approval policies. The former `threejs-game-studio.authoring` protocol remains declared as a compatibility protocol. Scope grants are not authenticated or enforced by the current same-page integration seam. **Implemented.**
-- Pure, immutable project tools for project/scene inspection, hierarchy and transforms, primitive materials, gameplay components, world/rendering settings, lights/cameras, and existing imported-model instances. Every successful result is validated before it can enter editor history. **Implemented.**
-- Local Guided Assistant with bounded plain-language planning and structured tool-call input, exact-value/contextual-risk proposal review, atomic pure project-tool multi-call validation, stale-revision rejection, one-step Undo, concurrent-proposal reservation, and normal autosave/viewport reconciliation. Project and editor-host mutations are reviewed separately, with host actions proposed one at a time. This is deliberately deterministic and not presented as a language model. **Implemented.**
-- Eighteen pure project tools plus fourteen browser-host definitions for project/input inspection and authoring, editor context/diagnostics, selection, viewport, Play/Preview/Step controls, history, console, layout, save/export/build, and user-mediated file-picker requests, producing a 32-tool combined manifest; plus a versioned trusted same-page integration bridge over cloned data. **Implemented.**
-- Contributor parity rule and contract tests requiring new human authoring areas to gain matching typed capabilities and browser/Undo coverage. **Implemented and ongoing.**
-- Local MCP stdio sidecar with loopback pairing, explicit scopes, cancellation, structured conflicts, and audit attribution. **Planned; the current browser bridge is not an MCP server.**
-- Model-backed built-in provider connected through a local model, secure companion, or hosted token broker. **Planned; no model API key or cloud provider is bundled.**
-- Staged, digest-verified out-of-band asset transfer for external agents instead of large base64 tool arguments or unrestricted filesystem paths. **Planned.**
+- Tailwind CSS v4, Vite integration, and the `@/*` alias.
+- Shadcn initialized with preset `b3YRKAGXPE` and Base UI; generated source, `components.json`, dependencies, and lockfile are committed.
+- Preset-owned semantic tokens plus separate `--studio-*` brand/viewport/editor tokens.
+- Legacy CSS imported through a lower-priority named cascade layer.
+- Dark-theme provider, Tooltip provider, Sonner host, and local `EditorPreferences` separate from project data.
+- Generated primitives for forms, menus/overlays, tabs/collapsibles, scroll/resizable/sheet/drawer, alerts/toasts, and related compositions.
+- Application Menubar, command dialog, icon buttons/tooltips, and every new Game Authoring surface use the new system.
+- Desktop Chromium and mobile WebKit coverage for migrated menus/dialogs/typing surfaces, focus restoration, portal cleanup, shortcut suppression, and axe serious/critical findings.
 
-Current AI-slice result: a human can ask the Guided Assistant for supported project changes, inspect exact nested binding values, apply a pure project-tool plan as one reversible transaction, and continue editing through the normal UI. A trusted same-page integration can discover the same contract, read Input Actions immediately, and route reference-safe remaps, reassignments, deletion, and Undo through visible revision-checked review. Its scope labels are advisory metadata rather than an authorization boundary. External connectivity, authenticated scope enforcement, and model intelligence remain separate deployment phases.
+### Foundations
 
-Success metric: adding a new human authoring surface fails the milestone unless its durable data is reachable through the shared capability registry or is explicitly documented as system-managed/read-only. See `docs/AI_ARCHITECTURE.md` for the capability matrix and security boundary.
+- Serializable split-tree workspace model, panel registry, desktop resizable shell, mobile sheet/drawer surfaces, and preference synchronization have focused tests.
 
-## Milestone 3 — Gameplay framework
+### Exit work
 
-- Extend the shipped gameplay-component foundation into a registry covering transform, model, camera, light, collider, rigid body, audio source, and custom behavior definitions.
-- Named Input Actions v1: project-level, stable two-axis actions with supported physical keyboard-code bindings (including usable modifiers), novice presets, Advanced authoring with conflict prevention and component-to-action navigation, component references, normalized Play/build resolution, migration, diagnostics, Undo, and matching typed AI capabilities. **Implemented.**
-- Rapier physics integration with fixed timestep, sensors, collision layers, debug shapes, and restart cleanup.
-- Extend Input Actions with buttons, action contexts, conflict guidance, runtime rebinding, pointer, touch, and gamepad bindings.
-- Scene flow, spawn points, tags/layers, events, timers, checkpoints, and save-game data.
-- Data-driven behavior graph for common logic.
-- TypeScript behavior SDK compiled in a Worker; runtime preview hosted in a sandboxed iframe.
-- Shared runtime loader for editor Play mode and exported games.
+- Adopt the workspace shell as the default workbench.
+- Migrate Hierarchy, Inspector, assets, console, legacy Input Actions, Quick Start, build, Assistant, viewport-adjacent controls, and remaining mobile surfaces.
+- Finish hierarchy roving-tab-stop/arrow/Home/End/rename semantics and broaden focus, contrast, target-size, axe, and visual coverage.
+- Remove obsolete legacy selectors one surface at a time.
 
-Success metric: users can build a small third-person/arcade game with movement, collisions, scoring, failure, restart, multiple scenes, and mobile input without changing editor internals.
+## Phase 1 — Authoritative contracts and runtime convergence
 
-## Milestone 4 — Animation, audio, VFX, and world tools
+### Integrated
 
-- Animation clip browser, state machine, transition preview, root-motion policy, and timeline.
-- Audio mixer groups, spatial audio, user-gesture unlock, mute/volume, and lifecycle cleanup.
-- Particle/VFX authoring with pooling and event-driven emission.
-- Terrain/heightfield tools, environment settings, post-processing profiles, fog, skies, and reflection probes.
-- Instancing, LOD, occlusion/culling settings, light baking helpers, and render-quality tiers.
-- UI canvas system for HUD, menus, anchoring, safe areas, localization-sized text, and touch controls.
+- V5 load/save/autosave/history/package path with strict v1–v5 loading and deterministic v4 migration.
+- Lossless active-scene compatibility adapter for legacy editor controls.
+- Versioned v5 scenes/entities/layers, prefabs, asset union, generalized input maps, variables/events, runtime UI, build profiles, and permissions.
+- Pure validated script-source operations used by both Monaco Save and typed game tools.
+- V5 bridge snapshot and typed game manifest for scripts, template creation, and build-profile preparation.
+- Visible Assistant proposal/apply flow for approval-required v5 bridge mutations, with stale-revision rejection and normal one-step Undo.
+- `RuntimeSession` schedules Play at fixed 60 Hz with a five-tick cap and exact Step.
+- `ProjectGameRuntime` detects/validates `runtime-bindings.v1`, then orchestrates generalized input, Rapier, gameplay events/state, transforms/visibility, diagnostics, and the generic runtime-UI HUD in editor Play without mutating v5.
+- Primary Build emits a deterministic, hashed, network-independent ZIP with local Three.js and Rapier modules, a source-stripped v5 runtime projection, inert compiled-script artifacts, available model bytes, and a local HUD stylesheet. Production bootstrap does not execute authored modules and the CSP denies all connections.
+- The offline v1 adapter runs the Collect rules with Rapier character collision, keyboard/gamepad input, touch controls, score/countdown, win/fail/restart, diagnostics, and cleanup.
 
-Success metric: a game can reach a polished, responsive presentation with measured desktop/mobile budgets and without custom engine patches.
+### Foundations
 
-## Milestone 5 — Build, collaboration, and ecosystem
+- Atomic schema-v4 command executor with optimistic revisions, strict payloads, structured errors, patches, affected records, and inverse snapshots.
+- Registry definitions for existing Rotate, Float, and Keyboard Move components.
+- Opaque-origin `RuntimePreviewHost` with identity/sequence validation, lifecycle commands, throttled diagnostics, restrictive CSP, and complete host cleanup.
+- Offline runtime that validates v4/v5 projects, selects the startup scene, renders primitives/lights/cameras, and uses a deterministic scheduler.
 
-- Self-contained static ZIP builds with hashed assets and configurable Vite base path.
-- Development, preview, production, and quality-tier build profiles.
-- Project templates, starter kits, reusable packages, and an extension manifest/API.
-- Git-friendly text serialization with deterministic ordering and stable IDs.
-- Optional cloud workspace, asset versioning, comments, branches, and multiplayer presence.
-- CI commands for project validation, headless playtests, visual baselines, and deploy adapters.
-- PWA/desktop packaging and Electron/Tauri filesystem bridge where browser permissions are limiting.
+### Exit work
 
-Success metric: teams can version, review, test, package, and deploy studio projects without vendor lock-in.
+- Replace compatibility commands with a v5-native command registry used by every human and agent mutation.
+- Add transactional coordination between project, source, and binary revisions.
+- Generalize the v1 binding contract into a registry-compiled runtime snapshot.
+- Execute authored TypeScript/graph bundles rather than built-in equivalent rules.
+- Move Play/Preview from same-page `ViewportEngine` ownership into `RuntimePreviewHost`.
+- Make Play and export instantiate identical scene/assets/systems/runtime UI, load packaged models, and prove complete teardown.
 
-## Technical architecture target
+Exit gate: a migrated legacy project and a v5 project reach the same deterministic checkpoints in sandboxed Play and an offline build without authored-data mutation.
 
-```text
-src/
-  app/                 editor shell, commands, shortcuts, workspaces
-  editor/
-    model/             schemas, migrations, references, validation
-    commands/          inverse operations and transactions
-    agent/             capability registry, policy, proposals, host adapters
-    viewport/          renderer, scene bridge, picking, editor helpers
-    panels/            hierarchy, inspector, assets, console, timeline
-  runtime/
-    scene-loader/      shared project → Three.js instantiation
-    systems/           input, physics, behavior, audio, animation, UI
-  assets/              import, cache, thumbnails, lifecycle, diagnostics
-  persistence/         IndexedDB and project package formats
-  export/              runtime packaging and build profiles
-  integrations/
-    mcp/               local/hosted transport adapter over shared capabilities
-  tests/               interaction, browser, visual, performance, migration
-```
+## Phase 2 — First complete game: Collect & Escape
 
-The current vertical slice keeps these boundaries compact, but its data model and scene bridge are already aligned with this target.
+### Authored template now
 
-## Performance budgets
+- Compact arena, player, obstacles, five pickups, exit, camera, and lights.
+- Keyboard, touch, and gamepad input mappings.
+- Physics body/collider/sensor/layer records.
+- Typed variables, events, timers, objective, win/fail/restart data.
+- A real editable TypeScript behavior source.
+- Responsive accessible runtime-UI/HUD data with touch controls.
+- Default-deny offline production build profile.
+- Editor command, typed replacement capability, deterministic validation tests, persistence, and packaging.
 
-Starting editor/runtime budgets for ordinary scenes:
+### Integrated vertical-slice runtime
 
-- Device pixel ratio capped at 2, with an adaptive mobile tier later.
-- One renderer and one animation loop per active viewport.
-- 60 FPS target on current desktop hardware; 30–60 FPS quality tiers on mobile.
-- Explicit disposal on entity removal, scene close, project switch, and asset replacement.
-- Shared geometries/materials and instancing for repeated props.
-- Shadow maps limited to intentional casting lights; default 1024px map on the starter key light.
-- Production diagnostics for draw calls, triangles, geometries, textures, and frame time.
+- Editor Play feeds keyboard, pointer/touch HUD actions, and polled gamepads through the generalized input resolver.
+- Editor Play uses the Rapier wrapper, deterministic state/events/objectives/timers, sensor pickups/exit, runtime-only transforms/visibility, and the generic accessible runtime-UI renderer.
+- Offline output packages local Rapier and runs keyboard/gamepad movement, hold-style touch controls, character collision, pickups/exit, score/countdown, win/fail/restart, a minimal accessible HUD, diagnostics, and cleanup.
+- Focused controller tests cover movement without document mutation, deterministic win/fail/restart, hold/release touch behavior, and HUD disposal. Focused offline tests cover keyboard win, gamepad movement, timeout, restart, HUD, and disposal.
 
-Project-specific budgets should become configurable build warnings rather than hard engine limits.
+### Remaining production integration
 
-## Main risks and mitigations
+- Execute the authored TypeScript behavior through the Studio SDK and opaque sandbox; current adapters implement equivalent built-in rules and read exposed binding properties.
+- Replace the editor's axis-aligned movement/collision adapter with a general registry-backed character-controller component and debug display.
+- Use the same runtime, state implementation, and generic runtime-UI renderer in Play and export.
+- Add general authoring operations/forms/tools for input, physics, state/events, runtime UI, and permissions.
+- Run the complete served ZIP journey with networking disabled, non-root hosting, and desktop/mobile control parity.
 
-| Risk | Mitigation |
-| --- | --- |
-| Browser storage and folder permissions | IndexedDB for working state; File System Access API where available; portable ZIP fallback. |
-| User scripts compromise the editor | Compile in a Worker and run preview in a sandboxed iframe with a narrow message API. |
-| Preview/export drift | Share the scene loader and runtime systems; clone the project document on Play. |
-| GPU/resource leaks | Reference-count assets, centralize ownership, dispose explicitly, verify renderer memory. |
-| History becomes noisy or huge | Command transactions for gizmo drags and numeric scrubbing; bounded history and structural sharing later. |
-| Large projects overload React | Keep per-frame/transient state inside the imperative runtime; publish only coarse diagnostics to UI. |
-| Mobile editor becomes cramped | One-surface-at-a-time drawers and review mode; desktop remains recommended for precise authoring. |
-| Agent path drifts from human controls | Require every authorable schema area to register a shared typed capability and test visible, undoable parity. |
-| Agent overwrites intervening work | Require a monotonic base revision for proposals/external writes and reject stale plans instead of silently rebasing. |
-| Browser credentials leak | Ship no provider secret in Vite/client storage; use an external MCP host, local/desktop secret store, local model, or hosted token broker. |
-| Untrusted same-page code invokes the integration bridge | Treat the current global as a trusted integration seam; its scope labels are advisory until an authenticated companion enforces grants. |
-| External agents exfiltrate files/assets | Keep file choice user-mediated now; later use scoped pairing and staged digest-checked transfer rather than raw paths or inline binaries. |
+### Exit gate
 
-## Definition of a credible “full game” release
+The game can be authored, played, paused/stepped, stopped without document mutation, reopened, exported, served from a non-root path with networking disabled, and completed on desktop and mobile. Keyboard, touch, and gamepad mappings reach equivalent checkpoints.
 
-The studio can claim full-game authoring when all of these exist end to end:
+## Phase 3 — Complete programming experience
 
-- Imported assets, prefabs, scenes, input actions, physics, behaviors/scripts, animation, audio, UI, persistence, and build profiles.
-- A complete objective/progression/fail/restart loop built from shipped components.
-- Editor Play mode and production export run the same project without manual code repair.
-- Desktop and mobile input/rendering pass automated and human playtests.
-- Save/load, migration, package import/export, missing assets, and runtime cleanup are tested.
-- A public extension contract exists so game-specific systems do not require forking the editor.
-- Every shipped authoring domain is discoverable and safely manipulable through the typed AI capability layer, with revision conflicts, approvals, and audit attribution enforced independently of the model or MCP client.
+### Partial/foundation now
+
+- V5 script assets and source catalog with normalized virtual paths, revisions, source-size validation, normal history/autosave, and code approval.
+- Lazy Monaco workspace with file creation/editing and diagnostics surface.
+- Studio behavior SDK, bounded virtual file system, `esbuild-wasm` compiler Worker/client, content hashes, dependency metadata, diagnostics, source maps, and last-known-good compiler result.
+- Build-time compilation packages successful script output into the ZIP.
+- Opaque sandbox document/protocol tests deny network and browser/editor handles.
+
+### Remaining
+
+- Script component attachment and Inspector-exposed schema properties.
+- Multi-file navigation, complete SDK autocomplete, formatting, search/references, templates, and rename/delete UI.
+- Runtime execution and last-known-good hot reload in `RuntimePreviewHost`.
+- Revision-tagged stale-compile cancellation, watchdogs, lifecycle cleanup, and source-linked logs.
+- Breakpoints, event tracing, runtime entity/variable inspection, and debugging.
+- Visual logic graphs compiled to the same behavior/runtime model.
+- Complete typed tools for attachment, properties, compilation, and diagnostics.
+
+Exit gate: a compile failure keeps the last-known-good game running, and Stop/restart removes every worker, timer, listener, Blob URL, and runtime resource.
+
+## Phase 4 — Content and game structure
+
+- Multi-scene authoring, transitions, persistent entities, and scene loading.
+- Prefab creation, linked instances, sparse overrides, apply/revert, unpack, nesting, and variants.
+- Asset importers for textures, materials, environments, audio, animation, scripts, fonts, and runtime UI.
+- Dependency inspection, source revisioning, thumbnails, compression, decoders, and missing-reference recovery.
+- Animator/state machines, clip events, preview, and root-motion policy.
+- Web Audio mixer, spatial sources, buses, gesture unlock, and cleanup.
+- Particle/VFX emitters, trails, post-processing profiles, and event-driven effects.
+- Save-slot schemas/migrations separate from project data.
+
+Exit gate: a multi-scene game with reusable prefabs, imported content, animation/audio/VFX, and migrated saves runs identically in Play and export.
+
+## Phase 5 — Professional editor workflow
+
+- Adopt and extend the current split-tree/panel registry into custom docking.
+- Saved Layout, Scripting, Animation, UI, and Debugging workspaces.
+- Multi-selection, drag/drop reparenting, contextual creation, prefab override visualization, and searchable references.
+- Monaco, graph editor, timeline, asset grid, virtualized console, profiler, and Assistant tool-call cards as Studio composites.
+- Project Settings for Input, Tags/Layers, Physics, Audio, Permissions, and Builds.
+- Runtime profiler for frame time, draw calls, triangles, memory, physics, scripts, audio, and asset budgets.
+- Templates and onboarding for common genres.
+
+Exit gate: an experienced developer can build and debug routine game features without leaving the editor, while all durable controls retain AI parity.
+
+## Phase 6 — Production and ecosystem
+
+- Deterministic cached builds, asset variants, LODs, compressed textures, streaming, and enforced budgets.
+- Versioned plugin/extension manifests over Studio registries.
+- CI validation, headless playtests, accessibility, parity, and reviewed visual baselines.
+- Local MCP sidecar with authenticated pairing/scopes/audit, then optional hosted transport.
+- Provider adapters without client-side secrets.
+- Hosted builds, collaboration, marketplace, multiplayer tooling, native packaging, and dedicated 2D workflows remain later initiatives, not dependencies of the first complete game.
+
+## Acceptance matrix
+
+| Area | Implemented checkpoint | Product release proof |
+| --- | --- | --- |
+| Shadcn/Base UI | Preset, tokens/providers, generated components, migrated menus/dialog/workspace surfaces, focused a11y tests | Default shell and every editor surface migrated; complete keyboard/focus/axe/mobile coverage |
+| Schema v5 | Authoritative load/save/history/package format plus legacy adapter | All authoring panels and runtime consumers operate v5-natively; adapter retired |
+| Commands/AI | Atomic v4 compatibility executor; v5 script/template/build tools with inverse snapshots | Every v5 human mutation uses the common command registry and produces the same result through a tool and one-step Undo |
+| Runtime | Shared scheduler plus v1 game-system adapter in same-page Play; secure host tested separately | `RuntimePreviewHost` is the sole Play/Preview path and the same compiled runtime runs in export |
+| Scripts | Monaco source authoring, compiler/sandbox foundations, build packaging | Component attachment, sandbox execution, hot reload, diagnostics/debugging, and security acceptance |
+| Input/physics/state | V1 Collect adapter consumes the production modules in editor Play; offline has an equivalent Rapier adapter | General registry components/settings/tools and one shared implementation |
+| Runtime UI | Hardened generic renderer mounts the editor HUD; offline mounts a separate accessible HUD | Visual authoring and the same responsive HUD/touch implementation in Play/export |
+| Offline build | Deterministic ZIP runs the specialized Collect rules with local Three/Rapier and no CDN | Exact Play runtime, model/decoder and compiled behavior execution, plus network-disabled journey |
+| Collect & Escape | Authored v5 template and runnable editor/offline manifest adapters | Script-driven opaque Play, same-runtime export, full desktop/mobile control parity and reopen journey |
+
+## Testing and release gates
+
+### UI and accessibility
+
+- Chromium and mobile WebKit workflows for menus, dialogs, command palette, portals, tabs, sheets, tooltips, toasts, focus restoration, and shortcut suppression.
+- Full hierarchy tree keyboard model with one roving tab stop.
+- `@axe-core/playwright` with zero serious/critical violations on core and overlay states.
+- Accessible names/live regions, dark-theme contrast, visible focus, 44 px mobile targets, inert modals, scroll lock, and portal cleanup.
+- Semantic tests pass before screenshot changes are accepted.
+
+### Data and AI
+
+- V4→v5 migration, malformed/cyclic references, component conflicts, source revisions, and package round trips.
+- Registry contracts require validation, Inspector metadata, runtime support, AI metadata, and migration.
+- Human/agent v5 equality plus one-step Undo for every authoring feature.
+- Stale revision, approval, deduplication, atomic failure, and stable error coverage.
+
+### Runtime, security, and build
+
+- Fixed-step behavior at 30/60/144 FPS and frame spikes.
+- Play/Pause/Step/Stop/restart/hot-reload/scene-transition cleanup.
+- Checkpoint parity between Play and export.
+- Scripts cannot reach parent DOM, editor storage, the authoring bridge, undeclared network endpoints, or raw browser handles.
+- Production output runs with networking disabled and from non-root paths.
+- No page/console errors, orphan portals, leaked body styles, listeners, physics/audio objects, GPU resources, or Blob URLs.
+
+## Definition of a credible full-game release
+
+ThreeJS Studio can claim complete game authoring only when:
+
+- Scenes, prefabs, assets, generalized input, physics, scripts/graphs, animation, audio, VFX, runtime UI, save data, and build profiles work end to end.
+- Collect & Escape is built using the same public authoring features users receive.
+- Play and production export share one compiled project/runtime and deterministic checkpoints.
+- Desktop and mobile control/rendering paths pass automated and human playtests.
+- Save/load, migration, packages, missing assets, security boundaries, and cleanup are tested.
+- Every authoring domain is discoverable and safely mutable through the typed AI layer.
+- A versioned extension contract exists so game-specific systems do not require editor forks.

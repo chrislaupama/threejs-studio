@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import { strFromU8, unzipSync } from 'fflate';
 import { PNG } from 'pngjs';
 import { makeExternalBufferGltf, makeTriangleGlb } from './fixtures/modelFixtures';
 
@@ -9,6 +10,58 @@ type CanvasSample = {
   variance?: number;
   colorBuckets?: number;
 };
+
+type OfflineBuildManifest = {
+  format: string;
+  formatVersion: number;
+  profile: string;
+  entrypoint: string;
+  project: string;
+  runtimeEntry: string;
+  scriptEntry: string | null;
+  offline: boolean;
+  networkDependencies: unknown[];
+  files: Array<{
+    path: string;
+    kind: string;
+    mediaType: string;
+    bytes: number;
+    sha256: string;
+  }>;
+};
+
+async function readOfflineBuild(downloadPath: string) {
+  const archive = unzipSync(new Uint8Array(await readFile(downloadPath)));
+  const manifestBytes = archive['manifest.json'];
+  const projectBytes = archive['project/project.json'];
+  const runtimeBytes = archive['runtime/main.js'];
+  expect(manifestBytes, 'offline build should include manifest.json').toBeTruthy();
+  expect(projectBytes, 'offline build should include project/project.json').toBeTruthy();
+  expect(runtimeBytes, 'offline build should include its version-locked runtime entry').toBeTruthy();
+
+  const manifest = JSON.parse(strFromU8(manifestBytes)) as OfflineBuildManifest;
+  expect(manifest).toMatchObject({
+    format: 'threejs-studio-offline-build',
+    formatVersion: 1,
+    profile: 'production',
+    entrypoint: 'index.html',
+    project: 'project/project.json',
+    runtimeEntry: 'runtime/main.js',
+    offline: true,
+    networkDependencies: [],
+  });
+  for (const file of manifest.files) {
+    expect(archive[file.path], `${file.path} should be present in the offline ZIP`).toBeTruthy();
+    expect(archive[file.path].byteLength, `${file.path} byte count should match the manifest`).toBe(file.bytes);
+  }
+
+  return {
+    archive,
+    manifest,
+    project: JSON.parse(strFromU8(projectBytes)) as Record<string, unknown>,
+    runtimeSource: strFromU8(runtimeBytes),
+  };
+}
 
 async function openFresh(page: Page) {
   await page.goto('/');
@@ -224,7 +277,7 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
 
   const objectCount = await page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.editor.objectCount);
   await page.keyboard.press('Control+K');
-  await expect(page.locator('.command-list').getByRole('button', { name: /Create Box/ })).toBeDisabled();
+  await expect(page.getByRole('dialog', { name: 'Command palette' }).getByRole('option', { name: /Create Box/ })).toBeDisabled();
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('studio-app')).toHaveClass(/mode-play/);
   await page.keyboard.press('Control+Z');
@@ -247,6 +300,7 @@ test('Advanced components compose and runtime remains isolated', async ({ page }
 
 test('Input Actions rebind movement across UI, Play, build, diagnostics, and Undo', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'Full keyboard authoring and runtime parity runs once on desktop.');
+  test.setTimeout(75_000);
   await openFresh(page);
   await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
   await page.locator('[data-node-id="player-rig"]').click();
@@ -311,11 +365,14 @@ test('Input Actions rebind movement across UI, Play, build, diagnostics, and Und
   const download = await downloadPromise;
   const downloadPath = await download.path();
   expect(downloadPath).toBeTruthy();
-  const html = await readFile(downloadPath!, 'utf8');
-  expect(html).toContain('"code":"KeyI"');
-  expect(html).toContain('"code":"ControlLeft"');
-  expect(html).toContain('resolveAction(component.actionId)');
-  expect(html).not.toContain("keys.has('w')");
+  expect(download.suggestedFilename()).toMatch(/\.zip$/u);
+  const build = await readOfflineBuild(downloadPath!);
+  const packagedProject = JSON.stringify(build.project);
+  expect(packagedProject).toContain('"code":"KeyI"');
+  expect(packagedProject).toContain('"code":"ControlLeft"');
+  expect(build.runtimeSource).toContain('resolveAction(actionId)');
+  expect(build.runtimeSource).toContain('resolveAction(component.actionId)');
+  expect(build.runtimeSource).not.toContain("keys.has('w')");
 
   await page.getByTestId('experience-toggle').getByRole('button', { name: 'Advanced' }).click();
   await page.keyboard.press('Control+Z');
@@ -373,7 +430,7 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
     { timeout: 10_000 },
   ).toBe(1);
   await page.getByTestId('save-project').click();
-  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-studio:project:v4') ?? '{}') as {
+  const metadata = await page.evaluate(() => JSON.parse(localStorage.getItem('threejs-studio:project:v5') ?? '{}') as {
     id: string;
     assets: Array<{ id: string; revision: number }>;
   });
@@ -424,17 +481,19 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
   await expect.poll(async () => page.evaluate(() => window.__THREEJS_STUDIO_DIAGNOSTICS__?.assets.readyInstances ?? 0)).toBe(3);
 
   const packageDownloadPromise = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'File', exact: true }).click();
-  await page.getByRole('button', { name: 'Export editable project' }).click();
+  await page.getByRole('menubar', { name: 'Application menu' }).getByRole('menuitem', { name: 'File', exact: true }).click();
+  await page.getByRole('menu').getByRole('menuitem', { name: 'Export editable project' }).click();
   const packageDownload = await packageDownloadPromise;
   const packagePath = await packageDownload.path();
   expect(packagePath).toBeTruthy();
   const packageValue = JSON.parse(await readFile(packagePath!, 'utf8')) as {
     format: string;
+    bundleVersion: number;
     project: { assets: Array<{ id: string; revision: number }> };
     assetSources: Array<{ assetId: string; revision: number; base64: string }>;
   };
   expect(packageValue.format).toBe('threejs-studio-project');
+  expect(packageValue.bundleVersion).toBe(2);
   expect(packageValue.assetSources).toHaveLength(1);
   expect(packageValue.assetSources[0].base64).toBe(fixture.toString('base64'));
 
@@ -461,9 +520,19 @@ test('Advanced models reuse GPU resources, recover missing bytes, and embed in b
   const download = await downloadPromise;
   const downloadPath = await download.path();
   expect(downloadPath).toBeTruthy();
-  const html = await readFile(downloadPath!, 'utf8');
-  expect(html).toContain(`data:model/gltf-binary;base64,${fixture.toString('base64')}`);
-  expect(html).toContain(metadata.assets[0].id);
+  expect(download.suggestedFilename()).toMatch(/\.zip$/u);
+  const build = await readOfflineBuild(downloadPath!);
+  const modelPath = `assets/models/${metadata.assets[0].id}/qa-triangle.glb`;
+  const modelBytes = build.archive[modelPath];
+  expect(modelBytes, 'offline build should package the relinked GLB as a binary asset').toBeTruthy();
+  expect(Buffer.compare(Buffer.from(modelBytes), fixture)).toBe(0);
+  expect(build.manifest.files).toContainEqual(expect.objectContaining({
+    path: modelPath,
+    kind: 'asset',
+    mediaType: 'model/gltf-binary',
+    bytes: fixture.byteLength,
+  }));
+  expect(JSON.stringify(build.project)).toContain(metadata.assets[0].id);
 });
 
 test('external-resource glTF fails atomically with actionable guidance', async ({ page }, testInfo) => {

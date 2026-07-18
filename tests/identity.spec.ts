@@ -31,13 +31,13 @@ test('ThreeJS Studio identity is canonical while legacy browser preferences and 
   await expect(page.locator('.brand-lockup')).toContainText('ThreeJSStudio');
 
   const migrated = await page.evaluate(() => ({
-    project: JSON.parse(localStorage.getItem('threejs-studio:project:v4') ?? 'null') as { id?: string } | null,
+    project: JSON.parse(localStorage.getItem('threejs-studio:project:v5') ?? 'null') as { id?: string; schemaVersion?: number } | null,
     experience: localStorage.getItem('threejs-studio:experience'),
     quickStart: JSON.parse(localStorage.getItem('threejs-studio:quick-start') ?? 'null') as { dismissed?: boolean } | null,
     legacyProjectRetained: localStorage.getItem('threejs-game-studio:project:v4') !== null,
   }));
   expect(migrated).toMatchObject({
-    project: { id: project.id },
+    project: { id: project.id, schemaVersion: 5 },
     experience: 'advanced',
     quickStart: { dismissed: true },
     legacyProjectRetained: true,

@@ -20,7 +20,20 @@ import {
   getInputActionReferences,
   updateInputAction,
 } from './inputActions';
+import {
+  PROJECT_COMMAND_PROTOCOL,
+  PROJECT_COMMAND_PROTOCOL_VERSION,
+  executeProjectCommandEnvelope,
+  type ProjectCommandError,
+  type ProjectCommandEnvelope,
+  type ProjectCommandInverse,
+  type ProjectPatchMetadata,
+} from './projectCommands';
+import { migrateProjectV4ToV5, validateProjectDocumentV5 } from './projectV5';
+import { deleteProjectScript, listProjectScripts, upsertProjectScript } from './gameAuthoring';
+import { createCollectEscapeProject } from '../templates/collectEscape';
 import type {
+  BuildProfileV5,
   CameraData,
   GameplayComponent,
   InputAction,
@@ -30,6 +43,7 @@ import type {
   NodeKind,
   PrimitiveType,
   ProjectDocument,
+  ProjectDocumentV5,
   ProjectSettings,
   SceneNode,
   TransformData,
@@ -160,6 +174,117 @@ export interface AgentNodeSummary {
   assetId?: string;
   componentTypes: GameplayComponent['type'][];
   childCount: number;
+}
+
+/**
+ * Legacy schema-v4 compatibility capabilities that sit beside the stable v1
+ * editor manifest. The mounted editor's source of truth is ProjectDocumentV5;
+ * this protocol remains exported so existing adapters can finish a v4 command
+ * transaction or request a read-only v5 migration projection.
+ */
+export type AgentEngineToolName =
+  | 'studio_execute_project_commands'
+  | 'studio_validate_v5_projection'
+  | 'studio_get_v5_projection'
+  | 'studio_list_build_profiles'
+  | 'studio_prepare_build';
+
+export type AgentEngineErrorCode =
+  | 'unknown-tool'
+  | 'invalid-arguments'
+  | 'invalid-project'
+  | 'invalid-revision'
+  | 'revision-conflict'
+  | 'migration-failed'
+  | 'validation-failed'
+  | 'not-found'
+  | ProjectCommandError['code'];
+
+export interface AgentEngineToolEffect {
+  project: 'read' | 'write';
+  history: 'none' | 'single-commit';
+  external: 'none' | 'prepared-build-request';
+}
+
+export interface AgentEngineToolAvailability {
+  host: 'project';
+  sourceProjectSchemaVersions: readonly [4];
+  projectionSchemaVersion: 5;
+  requirements: readonly string[];
+  notes: string;
+}
+
+export interface AgentEngineToolDefinition {
+  name: AgentEngineToolName;
+  title: string;
+  description: string;
+  category: 'project-commands' | 'schema' | 'build';
+  readOnly: boolean;
+  scopes: readonly string[];
+  risk: AgentToolRisk;
+  effect: AgentEngineToolEffect;
+  availability: AgentEngineToolAvailability;
+  inputSchema: AgentArgumentSchema;
+}
+
+export interface AgentEngineToolError {
+  code: AgentEngineErrorCode;
+  message: string;
+  path?: string;
+  details?: readonly string[];
+  expectedRevision?: number;
+  actualRevision?: number;
+  commandIndex?: number;
+  commandId?: string;
+}
+
+export interface AgentEngineHistoryCommit {
+  strategy: 'commit-project-command-result';
+  label: string;
+  patch: ProjectPatchMetadata;
+  inverse: ProjectCommandInverse;
+}
+
+export interface AgentBuildActionDescriptor {
+  action: 'build-project-profile';
+  requestId: string;
+  projectId: string;
+  projectRevision: number;
+  projectSchemaVersion: 5;
+  profile: BuildProfileV5;
+  execution: {
+    host: 'editor';
+    approval: 'required';
+    scope: 'project.build';
+    createsExternalArtifact: true;
+  };
+}
+
+export interface AgentEngineToolResult<T = unknown> {
+  protocol: 'threejs-studio.engine-authoring';
+  protocolVersion: 1;
+  toolName: string;
+  ok: boolean;
+  changed: boolean;
+  project: ProjectDocument;
+  baseRevision: number;
+  revision: number;
+  errors: AgentEngineToolError[];
+  warnings: string[];
+  data?: T;
+  history?: AgentEngineHistoryCommit;
+}
+
+export interface AgentEngineCapabilityManifest {
+  protocol: 'threejs-studio.engine-authoring';
+  protocolVersion: 1;
+  status: 'legacy-compatibility';
+  sourceProjectSchemaVersion: 4;
+  projectionSchemaVersion: 5;
+  authoritativeProjectSchemaVersion: 5;
+  supersededByProtocol: 'threejs-studio.game-authoring';
+  guarantees: readonly string[];
+  tools: readonly AgentEngineToolDefinition[];
 }
 
 const primitiveValues = ['box', 'sphere', 'capsule', 'cylinder', 'cone', 'plane', 'torus'] as const;
@@ -887,6 +1012,173 @@ export const AGENT_CAPABILITY_MANIFEST: AgentCapabilityManifest = Object.freeze<
     { id: 'project-io', title: 'Save, import, export, and build workflows', read: true, write: true, toolNames: ['studio_save_project', 'studio_export_project', 'studio_build_project', 'studio_request_project_import', 'studio_request_model_import'] },
   ],
   tools: AGENT_TOOL_DEFINITIONS,
+});
+
+const optimisticRevisionSchema: AgentArgumentSchema = {
+  type: 'integer',
+  minimum: 0,
+  description: 'Revision observed by the caller. The call is rejected when the open project has advanced.',
+};
+
+const projectCommandEnvelopeSchema: AgentArgumentSchema = {
+  type: 'object',
+  properties: {
+    protocol: { type: 'string', enum: [PROJECT_COMMAND_PROTOCOL] },
+    protocolVersion: { type: 'integer', enum: [PROJECT_COMMAND_PROTOCOL_VERSION] },
+    id: stableIdSchema('Stable idempotency identifier for this transaction.'),
+    projectId: stableIdSchema('Open project identifier.'),
+    baseRevision: optimisticRevisionSchema,
+    label: stringSchema('Human-readable Undo/history label.'),
+    commands: {
+      type: 'array',
+      minItems: 1,
+      description: 'Serializable project commands. Command-specific validation is performed atomically by the command executor.',
+      items: { type: 'object' },
+    },
+  },
+  required: ['protocol', 'protocolVersion', 'id', 'projectId', 'baseRevision', 'label', 'commands'],
+  additionalProperties: false,
+};
+
+const engineAvailability = (
+  requirements: readonly string[],
+  notes: string,
+): AgentEngineToolAvailability => ({
+  host: 'project',
+  sourceProjectSchemaVersions: [4],
+  projectionSchemaVersion: 5,
+  requirements,
+  notes,
+});
+
+const engineToolDefinitions: AgentEngineToolDefinition[] = [
+  {
+    name: 'studio_execute_project_commands',
+    title: 'Execute legacy project command transaction',
+    description: 'Validate and atomically execute a revision-checked schema-v4 compatibility ProjectCommandEnvelope. A successful mutation returns patch and inverse data for exactly one normal editor history commit.',
+    category: 'project-commands',
+    readOnly: false,
+    scopes: ['project.read', 'project.write', 'history.write'],
+    risk: { level: 'moderate', approval: 'when-sensitive', reversible: true, rationale: 'Executes one validated, undoable transaction; command contents may increase the required approval level.' },
+    effect: { project: 'write', history: 'single-commit', external: 'none' },
+    availability: engineAvailability(
+      ['valid normalized ProjectDocument v4', 'non-negative current editor revision'],
+      'Legacy compatibility only. Command support is registry-backed and limited to schema-v4 command types advertised by projectCommands.ts; new durable game authoring uses the schema-v5 game-authoring protocol.',
+    ),
+    inputSchema: {
+      type: 'object',
+      properties: { envelope: projectCommandEnvelopeSchema },
+      required: ['envelope'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_validate_v5_projection',
+    title: 'Validate legacy schema-v4 migration projection',
+    description: 'Migrate a cloned legacy ProjectDocumentV4 input to the current ProjectDocumentV5 contract and return structured readiness diagnostics without changing either document.',
+    category: 'schema',
+    readOnly: true,
+    scopes: ['project.read', 'schema.read'],
+    risk: { level: 'read', approval: 'none', reversible: true, rationale: 'Validates cloned serializable project data only.' },
+    effect: { project: 'read', history: 'none', external: 'none' },
+    availability: engineAvailability(
+      ['valid normalized ProjectDocument v4'],
+      'Compatibility/readiness check only. ProjectDocumentV5 is the mounted editor source of truth; this adapter cannot mutate it.',
+    ),
+    inputSchema: {
+      type: 'object',
+      properties: { baseRevision: optimisticRevisionSchema },
+      required: ['baseRevision'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_get_v5_projection',
+    title: 'Get legacy schema-v4 migration projection',
+    description: 'Return a validated, serializable ProjectDocumentV5 migration projection of a legacy schema-v4 input. Neither the input nor the mounted authoritative project is mutated.',
+    category: 'schema',
+    readOnly: true,
+    scopes: ['project.read', 'schema.read', 'scene.read', 'assets.read', 'input.read', 'build.read'],
+    risk: { level: 'read', approval: 'none', reversible: true, rationale: 'Reads and clones project data without changing it.' },
+    effect: { project: 'read', history: 'none', external: 'none' },
+    availability: engineAvailability(
+      ['valid normalized ProjectDocument v4'],
+      'The returned schema-v5 document is a detached compatibility projection. Authoritative schema-v5 mutations must use the game-authoring protocol and normal v5 commit/history path.',
+    ),
+    inputSchema: {
+      type: 'object',
+      properties: { baseRevision: optimisticRevisionSchema },
+      required: ['baseRevision'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_list_build_profiles',
+    title: 'List projected legacy build profiles',
+    description: 'List validated schema-v5 build profiles projected from a legacy schema-v4 compatibility input and report its default profile.',
+    category: 'build',
+    readOnly: true,
+    scopes: ['project.read', 'build.read'],
+    risk: { level: 'read', approval: 'none', reversible: true, rationale: 'Reads build configuration only.' },
+    effect: { project: 'read', history: 'none', external: 'none' },
+    availability: engineAvailability(
+      ['valid schema-v5 projection'],
+      'Read-only compatibility view. ProjectDocumentV5 is already authoritative; use the game-authoring protocol for current build-profile reads and build preparation.',
+    ),
+    inputSchema: {
+      type: 'object',
+      properties: { baseRevision: optimisticRevisionSchema },
+      required: ['baseRevision'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_prepare_build',
+    title: 'Prepare projected legacy build request',
+    description: 'Validate a build profile projected from a legacy schema-v4 input and return a serializable editor-host action descriptor. This tool creates no artifact; executing the descriptor requires visible approval.',
+    category: 'build',
+    readOnly: true,
+    scopes: ['project.read', 'build.read'],
+    risk: { level: 'read', approval: 'none', reversible: true, rationale: 'Only prepares a request; the separate artifact-producing editor action requires approval.' },
+    effect: { project: 'read', history: 'none', external: 'prepared-build-request' },
+    availability: engineAvailability(
+      ['valid schema-v5 projection', 'existing build profile'],
+      'The returned action can run only through a mounted editor build host after human approval.',
+    ),
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseRevision: optimisticRevisionSchema,
+        profileId: stableIdSchema('Build profile identifier. Omit to use the project default.'),
+      },
+      required: ['baseRevision'],
+      additionalProperties: false,
+    },
+  },
+];
+
+export const AGENT_ENGINE_TOOL_DEFINITIONS: readonly AgentEngineToolDefinition[] = Object.freeze(
+  engineToolDefinitions.map((definition) => Object.freeze(definition)),
+);
+
+export const AGENT_ENGINE_CAPABILITY_MANIFEST: AgentEngineCapabilityManifest = Object.freeze({
+  protocol: 'threejs-studio.engine-authoring',
+  protocolVersion: 1,
+  status: 'legacy-compatibility',
+  sourceProjectSchemaVersion: 4,
+  projectionSchemaVersion: 5,
+  authoritativeProjectSchemaVersion: 5,
+  supersededByProtocol: 'threejs-studio.game-authoring',
+  guarantees: [
+    'This protocol is a schema-v4 compatibility adapter; ProjectDocumentV5 is the mounted editor source of truth.',
+    'Every call requires the caller revision or a ProjectCommandEnvelope carrying it.',
+    'Stale calls return a stable revision-conflict error and never partially apply.',
+    'Project commands validate before and after every mutation and commit atomically.',
+    'A changed command transaction returns one patch and inverse snapshot for the normal editor history path.',
+    'Migration-projection and build-profile reads operate on validated clones and never mutate the legacy input or authoritative schema-v5 document.',
+    'Build preparation returns serializable intent only; artifact creation requires a mounted editor host and visible approval.',
+  ],
+  tools: AGENT_ENGINE_TOOL_DEFINITIONS,
 });
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -2006,4 +2298,534 @@ export function executeAgentTool<T = unknown>(project: ProjectDocument, toolName
     return invalidResult(inputValidation.project, 'Run agent tool', [`Unknown agent tool "${toolName}".`]) as AgentToolResult<T>;
   }
   return executor(inputValidation.project, args) as AgentToolResult<T>;
+}
+
+export function getAgentEngineToolDefinition(name: string): AgentEngineToolDefinition | undefined {
+  return AGENT_ENGINE_TOOL_DEFINITIONS.find((definition) => definition.name === name);
+}
+
+export function validateAgentEngineToolArguments(toolName: string, args: unknown): string[] {
+  const definition = getAgentEngineToolDefinition(toolName);
+  if (!definition) return [`Unknown engine authoring tool "${toolName}".`];
+  const errors: string[] = [];
+  validateSchemaValue(definition.inputSchema as UnknownRecord, args, 'arguments', errors);
+  return errors;
+}
+
+export function assessAgentEngineToolCall(
+  project: ProjectDocument,
+  toolName: string,
+  args: unknown,
+): AgentToolCallAssessment {
+  const definition = getAgentEngineToolDefinition(toolName);
+  if (!definition) {
+    return {
+      toolName,
+      level: 'destructive',
+      approval: 'required',
+      reversible: false,
+      rationale: 'Unknown tools are outside the advertised engine-authoring contract.',
+      requiresApproval: true,
+      reasons: ['The requested engine authoring tool is unknown.'],
+    };
+  }
+
+  let level = definition.risk.level;
+  let approval = definition.risk.approval;
+  const reasons: string[] = [];
+  if (toolName === 'studio_execute_project_commands' && isRecord(args) && isRecord(args.envelope)) {
+    const commands = Array.isArray(args.envelope.commands) ? args.envelope.commands : [];
+    for (const command of commands) {
+      if (!isRecord(command) || typeof command.type !== 'string') continue;
+      if (command.type === 'project.replace') reasons.push('The transaction replaces the complete project document.');
+      if (command.type === 'node.delete') reasons.push('The transaction deletes a scene hierarchy subtree.');
+      if (command.type === 'inputAction.delete') reasons.push('The transaction deletes a named input mapping.');
+      if (command.type === 'node.update' && isRecord(command.changes)) {
+        if (hasOwn(command.changes, 'parentId')) reasons.push('The transaction changes scene hierarchy.');
+        if (hasOwn(command.changes, 'camera') || hasOwn(command.changes, 'light')) {
+          reasons.push('The transaction changes game framing or lighting.');
+        }
+        if (typeof command.nodeId === 'string' && getNode(project, command.nodeId)?.locked) {
+          reasons.push(`The transaction changes locked node "${command.nodeId}".`);
+        }
+      }
+    }
+  }
+  if (reasons.length) {
+    level = reasons.some((reason) => reason.includes('complete project') || reason.includes('deletes'))
+      ? 'destructive'
+      : 'moderate';
+    approval = 'required';
+  }
+  return {
+    ...definition.risk,
+    toolName,
+    level,
+    approval,
+    requiresApproval: approval === 'required',
+    reasons: reasons.length ? [...new Set(reasons)] : [definition.risk.rationale],
+  };
+}
+
+function engineFailure<T>(
+  project: ProjectDocument,
+  currentRevision: number,
+  toolName: string,
+  errors: AgentEngineToolError[],
+): AgentEngineToolResult<T> {
+  return {
+    protocol: 'threejs-studio.engine-authoring',
+    protocolVersion: 1,
+    toolName,
+    ok: false,
+    changed: false,
+    project: cloneProject(project),
+    baseRevision: currentRevision,
+    revision: currentRevision,
+    errors,
+    warnings: [],
+  };
+}
+
+function readEngineRevision(args: unknown): number | null {
+  if (!isRecord(args) || !Number.isInteger(args.baseRevision) || (args.baseRevision as number) < 0) return null;
+  return args.baseRevision as number;
+}
+
+function projectV5Projection(project: ProjectDocument):
+  | { ok: true; project: ProjectDocumentV5; warnings: string[] }
+  | { ok: false; error: AgentEngineToolError } {
+  try {
+    const migrated = migrateProjectV4ToV5(project);
+    const validation = validateProjectDocumentV5(migrated);
+    if (!validation.ok) {
+      return {
+        ok: false,
+        error: {
+          code: 'validation-failed',
+          message: 'The schema-v5 projection failed complete-project validation.',
+          details: validation.errors,
+        },
+      };
+    }
+    return { ok: true, project: validation.project, warnings: validation.warnings };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: 'migration-failed',
+        message: error instanceof Error ? error.message : 'The project could not be projected to schema v5.',
+      },
+    };
+  }
+}
+
+/**
+ * Pure entrypoint for the legacy schema-v4 compatibility contract. It does not
+ * operate on the mounted authoritative ProjectDocumentV5. A compatibility host
+ * owns the legacy revision and must commit a successful changed result through
+ * its normal history/autosave path using the returned `history` metadata.
+ */
+export function executeAgentEngineTool<T = unknown>(
+  project: ProjectDocument,
+  currentRevision: number,
+  toolName: string,
+  args: unknown = {},
+): AgentEngineToolResult<T> {
+  const safeRevision = Number.isInteger(currentRevision) && currentRevision >= 0 ? currentRevision : 0;
+  if (!Number.isInteger(currentRevision) || currentRevision < 0) {
+    return engineFailure(project, safeRevision, toolName, [{
+      code: 'invalid-revision',
+      message: 'Current revision must be a non-negative integer.',
+      actualRevision: currentRevision,
+    }]);
+  }
+  const definition = getAgentEngineToolDefinition(toolName);
+  if (!definition) {
+    return engineFailure(project, currentRevision, toolName, [{
+      code: 'unknown-tool',
+      message: `Unknown engine authoring tool "${toolName}".`,
+    }]);
+  }
+  const argumentErrors = validateAgentEngineToolArguments(toolName, args);
+  if (argumentErrors.length) {
+    return engineFailure(project, currentRevision, toolName, [{
+      code: 'invalid-arguments',
+      message: 'Tool arguments failed schema validation.',
+      details: argumentErrors,
+    }]);
+  }
+  const inputValidation = loadProjectDocument(project);
+  if (!inputValidation.ok || inputValidation.warnings.length) {
+    return engineFailure(project, currentRevision, toolName, [{
+      code: 'invalid-project',
+      message: 'The current project must be valid and normalized before engine authoring tools run.',
+      details: inputValidation.ok ? inputValidation.warnings : inputValidation.errors,
+    }]);
+  }
+  const normalizedProject = inputValidation.project;
+
+  if (toolName === 'studio_execute_project_commands') {
+    const envelope = (args as { envelope: ProjectCommandEnvelope }).envelope;
+    const commandResult = executeProjectCommandEnvelope(normalizedProject, currentRevision, envelope);
+    if (!commandResult.ok) {
+      return {
+        ...engineFailure(normalizedProject, currentRevision, toolName, commandResult.errors),
+        warnings: commandResult.warnings.map((warning) => warning.message),
+      } as AgentEngineToolResult<T>;
+    }
+    const history = commandResult.changed && commandResult.patch && commandResult.inverse
+      ? {
+          strategy: 'commit-project-command-result' as const,
+          label: envelope.label,
+          patch: commandResult.patch,
+          inverse: commandResult.inverse,
+        }
+      : undefined;
+    return {
+      protocol: 'threejs-studio.engine-authoring',
+      protocolVersion: 1,
+      toolName,
+      ok: true,
+      changed: commandResult.changed,
+      project: commandResult.project,
+      baseRevision: commandResult.baseRevision,
+      revision: commandResult.revision,
+      errors: [],
+      warnings: commandResult.warnings.map((warning) => warning.message),
+      data: commandResult as T,
+      ...(history ? { history } : {}),
+    };
+  }
+
+  const baseRevision = readEngineRevision(args);
+  if (baseRevision !== currentRevision) {
+    return engineFailure(normalizedProject, currentRevision, toolName, [{
+      code: 'revision-conflict',
+      message: `Tool revision ${baseRevision ?? 'unknown'} is stale; current revision is ${currentRevision}.`,
+      ...(baseRevision === null ? {} : { expectedRevision: baseRevision }),
+      actualRevision: currentRevision,
+    }]);
+  }
+  const projection = projectV5Projection(normalizedProject);
+  if (!projection.ok) return engineFailure(normalizedProject, currentRevision, toolName, [projection.error]);
+
+  let data: unknown;
+  if (toolName === 'studio_validate_v5_projection') {
+    data = {
+      valid: true,
+      sourceSchemaVersion: 4,
+      projectionSchemaVersion: 5,
+      projectId: projection.project.id,
+      totals: {
+        scenes: projection.project.scenes.length,
+        entities: projection.project.entities.length,
+        prefabs: projection.project.prefabs.length,
+        assets: projection.project.assets.length,
+        inputMaps: projection.project.inputMaps.length,
+        buildProfiles: projection.project.buildProfiles.length,
+      },
+      diagnostics: [],
+    };
+  } else if (toolName === 'studio_get_v5_projection') {
+    data = { project: projection.project };
+  } else if (toolName === 'studio_list_build_profiles') {
+    data = {
+      defaultBuildProfileId: projection.project.defaultBuildProfileId,
+      profiles: structuredClone(projection.project.buildProfiles),
+    };
+  } else if (toolName === 'studio_prepare_build') {
+    const requestedId = isRecord(args) && typeof args.profileId === 'string'
+      ? args.profileId
+      : projection.project.defaultBuildProfileId;
+    const profile = projection.project.buildProfiles.find((candidate) => candidate.id === requestedId);
+    if (!profile) {
+      return engineFailure(normalizedProject, currentRevision, toolName, [{
+        code: 'not-found',
+        message: `Build profile "${requestedId}" does not exist.`,
+        path: 'arguments.profileId',
+      }]);
+    }
+    data = {
+      action: {
+        action: 'build-project-profile',
+        requestId: `build.${projection.project.id}.${currentRevision}.${profile.id}`,
+        projectId: projection.project.id,
+        projectRevision: currentRevision,
+        projectSchemaVersion: 5,
+        profile: structuredClone(profile),
+        execution: {
+          host: 'editor',
+          approval: 'required',
+          scope: 'project.build',
+          createsExternalArtifact: true,
+        },
+      } satisfies AgentBuildActionDescriptor,
+    };
+  } else {
+    return engineFailure(normalizedProject, currentRevision, toolName, [{
+      code: 'unknown-tool',
+      message: `Engine authoring tool "${toolName}" has no executor.`,
+    }]);
+  }
+
+  return {
+    protocol: 'threejs-studio.engine-authoring',
+    protocolVersion: 1,
+    toolName,
+    ok: true,
+    changed: false,
+    project: cloneProject(normalizedProject),
+    baseRevision: currentRevision,
+    revision: currentRevision,
+    errors: [],
+    warnings: projection.warnings,
+    data: data as T,
+  };
+}
+
+// This is the authoritative schema-v5 game-authoring capability surface. The
+// legacy engine protocol above remains available only for schema-v4 adapters
+// and detached migration projections while legacy human panels are ported.
+export type AgentGameToolName =
+  | 'studio_list_scripts'
+  | 'studio_get_script'
+  | 'studio_upsert_script'
+  | 'studio_delete_script'
+  | 'studio_create_collect_escape'
+  | 'studio_list_game_build_profiles'
+  | 'studio_prepare_game_build';
+
+export interface AgentGameToolDefinition {
+  name: AgentGameToolName;
+  description: string;
+  scope: readonly string[];
+  effect: 'read' | 'project-write' | 'prepared-external-action';
+  approval: 'none' | 'required';
+  availability: { schemaVersion: 5; mode: 'edit'; requirements: readonly string[] };
+  inputSchema: AgentArgumentSchema;
+}
+
+export interface AgentGameToolResult<T = unknown> {
+  protocol: 'threejs-studio.game-authoring';
+  protocolVersion: 1;
+  toolName: string;
+  ok: boolean;
+  changed: boolean;
+  baseRevision: number;
+  revision: number;
+  project: ProjectDocumentV5;
+  data?: T;
+  errors: Array<{ code: 'unknown-tool' | 'invalid-arguments' | 'invalid-project' | 'revision-conflict' | 'not-found' | 'validation-failed'; message: string; path?: string; details?: string[] }>;
+  warnings: string[];
+  history?: {
+    strategy: 'commit-v5-project-snapshot';
+    label: string;
+    inverse: ProjectDocumentV5;
+  };
+}
+
+const gameRevisionProperty: AgentArgumentSchema = { type: 'integer', minimum: 0, description: 'Optimistic current editor revision.' };
+const gameStableIdProperty: AgentArgumentSchema = { type: 'string', minLength: 1, maxLength: 160, pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]*$' };
+
+export const AGENT_GAME_TOOL_DEFINITIONS: readonly AgentGameToolDefinition[] = Object.freeze([
+  {
+    name: 'studio_list_scripts',
+    description: 'List versioned project behavior scripts and source metadata.',
+    scope: ['project.read', 'scripts.read'],
+    effect: 'read',
+    approval: 'none',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['valid ProjectDocumentV5'] },
+    inputSchema: { type: 'object', properties: { baseRevision: gameRevisionProperty }, required: ['baseRevision'], additionalProperties: false },
+  },
+  {
+    name: 'studio_get_script',
+    description: 'Read one behavior source by stable script asset id.',
+    scope: ['project.read', 'scripts.read'],
+    effect: 'read',
+    approval: 'none',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['valid ProjectDocumentV5', 'existing script asset'] },
+    inputSchema: { type: 'object', properties: { baseRevision: gameRevisionProperty, assetId: gameStableIdProperty }, required: ['baseRevision', 'assetId'], additionalProperties: false },
+  },
+  {
+    name: 'studio_upsert_script',
+    description: 'Create or update executable behavior source through the same validated operation used by Monaco Save.',
+    scope: ['project.read', 'project.write', 'scripts.write', 'history.write'],
+    effect: 'project-write',
+    approval: 'required',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['valid ProjectDocumentV5', 'visible executable-code review'] },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        baseRevision: gameRevisionProperty,
+        assetId: gameStableIdProperty,
+        path: { type: 'string', minLength: 1, maxLength: 512 },
+        source: { type: 'string', maxLength: 2 * 1024 * 1024 },
+        timestamp: { type: 'string', minLength: 1, maxLength: 64 },
+      },
+      required: ['baseRevision', 'assetId', 'path', 'source', 'timestamp'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_delete_script',
+    description: 'Delete one behavior and its source catalog entry as one undoable transaction.',
+    scope: ['project.read', 'project.write', 'scripts.write', 'history.write'],
+    effect: 'project-write',
+    approval: 'required',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['valid ProjectDocumentV5', 'existing script asset'] },
+    inputSchema: {
+      type: 'object',
+      properties: { baseRevision: gameRevisionProperty, assetId: gameStableIdProperty, timestamp: { type: 'string', minLength: 1, maxLength: 64 } },
+      required: ['baseRevision', 'assetId', 'timestamp'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'studio_create_collect_escape',
+    description: 'Replace the current project with the bundled Collect & Escape production template.',
+    scope: ['project.write', 'templates.read', 'history.write'],
+    effect: 'project-write',
+    approval: 'required',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['visible whole-project replacement review'] },
+    inputSchema: { type: 'object', properties: { baseRevision: gameRevisionProperty }, required: ['baseRevision'], additionalProperties: false },
+  },
+  {
+    name: 'studio_list_game_build_profiles',
+    description: 'List authoritative schema-v5 build profiles.',
+    scope: ['project.read', 'build.read'],
+    effect: 'read',
+    approval: 'none',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['valid ProjectDocumentV5'] },
+    inputSchema: { type: 'object', properties: { baseRevision: gameRevisionProperty }, required: ['baseRevision'], additionalProperties: false },
+  },
+  {
+    name: 'studio_prepare_game_build',
+    description: 'Prepare a serializable offline-build action; artifact creation remains a separately approved editor-host action.',
+    scope: ['project.read', 'build.read'],
+    effect: 'prepared-external-action',
+    approval: 'none',
+    availability: { schemaVersion: 5, mode: 'edit', requirements: ['valid ProjectDocumentV5', 'existing build profile'] },
+    inputSchema: { type: 'object', properties: { baseRevision: gameRevisionProperty, profileId: gameStableIdProperty }, required: ['baseRevision'], additionalProperties: false },
+  },
+]);
+
+export const AGENT_GAME_CAPABILITY_MANIFEST = Object.freeze({
+  protocol: 'threejs-studio.game-authoring' as const,
+  protocolVersion: 1 as const,
+  status: 'authoritative' as const,
+  projectSchemaVersion: 5 as const,
+  projectDocument: 'ProjectDocumentV5' as const,
+  projectDocumentRole: 'source-of-truth' as const,
+  legacyCompatibilityProtocol: 'threejs-studio.engine-authoring' as const,
+  guarantees: Object.freeze([
+    'This is the authoritative capability manifest for durable schema-v5 game authoring.',
+    'Every call validates the complete schema-v5 project and uses optimistic revisions.',
+    'Every mutation returns one inverse project snapshot for normal editor history and Undo.',
+    'Executable-code changes, deletion, project replacement, and artifact creation require visible approval.',
+    'Build preparation is read-only and approval-free; its returned editor-host artifact action still requires visible approval before execution.',
+    'All inputs and outputs are serializable and contain no DOM, renderer, React, storage, or browser handles.',
+  ]),
+  tools: AGENT_GAME_TOOL_DEFINITIONS,
+});
+
+export function assessAgentGameToolCall(toolName: string): AgentToolCallAssessment {
+  const definition = AGENT_GAME_TOOL_DEFINITIONS.find((entry) => entry.name === toolName);
+  if (!definition) return {
+    toolName,
+    level: 'destructive',
+    approval: 'required',
+    reversible: false,
+    rationale: 'Unknown game-authoring tool.',
+    requiresApproval: true,
+    reasons: ['The tool is not in the capability manifest.'],
+  };
+  const write = definition.effect === 'project-write';
+  return {
+    toolName,
+    level: definition.approval === 'required' ? (write ? 'moderate' : 'read') : 'read',
+    approval: definition.approval,
+    reversible: true,
+    rationale: definition.description,
+    requiresApproval: definition.approval === 'required',
+    reasons: [definition.description],
+  };
+}
+
+function gameToolFailure<T>(
+  project: ProjectDocumentV5,
+  revision: number,
+  toolName: string,
+  code: AgentGameToolResult['errors'][number]['code'],
+  message: string,
+  details?: string[],
+): AgentGameToolResult<T> {
+  return {
+    protocol: 'threejs-studio.game-authoring', protocolVersion: 1, toolName,
+    ok: false, changed: false, baseRevision: revision, revision,
+    project: structuredClone(project), errors: [{ code, message, ...(details ? { details } : {}) }], warnings: [],
+  };
+}
+
+export function executeAgentGameTool<T = unknown>(
+  project: ProjectDocumentV5,
+  currentRevision: number,
+  toolName: string,
+  args: unknown,
+): AgentGameToolResult<T> {
+  const validation = validateProjectDocumentV5(project);
+  if (!validation.ok) return gameToolFailure(project, currentRevision, toolName, 'invalid-project', 'ProjectDocumentV5 validation failed.', validation.errors);
+  const definition = AGENT_GAME_TOOL_DEFINITIONS.find((entry) => entry.name === toolName);
+  if (!definition) return gameToolFailure(validation.project, currentRevision, toolName, 'unknown-tool', `Unknown game-authoring tool "${toolName}".`);
+  const argumentErrors: string[] = [];
+  validateSchemaValue(definition.inputSchema as UnknownRecord, args, 'arguments', argumentErrors);
+  if (argumentErrors.length) return gameToolFailure(validation.project, currentRevision, toolName, 'invalid-arguments', 'Tool arguments failed validation.', argumentErrors);
+  const record = args as Record<string, unknown>;
+  if (record.baseRevision !== currentRevision) {
+    return gameToolFailure(validation.project, currentRevision, toolName, 'revision-conflict', `Tool revision ${String(record.baseRevision)} is stale; current revision is ${currentRevision}.`);
+  }
+
+  const scripts = listProjectScripts(validation.project);
+  let next = validation.project;
+  let data: unknown;
+  let label = definition.description;
+  if (toolName === 'studio_list_scripts') data = { scripts };
+  else if (toolName === 'studio_get_script') {
+    const script = scripts.find((entry) => entry.assetId === record.assetId);
+    if (!script) return gameToolFailure(validation.project, currentRevision, toolName, 'not-found', `Script asset "${String(record.assetId)}" does not exist.`);
+    data = { script };
+  } else if (toolName === 'studio_upsert_script') {
+    const result = upsertProjectScript(validation.project, {
+      assetId: String(record.assetId), path: String(record.path), source: String(record.source), timestamp: String(record.timestamp),
+    });
+    if (!result.ok) return gameToolFailure(validation.project, currentRevision, toolName, 'validation-failed', 'Script update was rejected.', result.errors);
+    next = result.project;
+    label = `Update script · ${String(record.path)}`;
+    data = { affectedAssetIds: result.affectedAssetIds };
+  } else if (toolName === 'studio_delete_script') {
+    const result = deleteProjectScript(validation.project, String(record.assetId), String(record.timestamp));
+    if (!result.ok) return gameToolFailure(validation.project, currentRevision, toolName, 'validation-failed', 'Script deletion was rejected.', result.errors);
+    next = result.project;
+    label = `Delete script · ${String(record.assetId)}`;
+    data = { affectedAssetIds: result.affectedAssetIds };
+  } else if (toolName === 'studio_create_collect_escape') {
+    next = createCollectEscapeProject();
+    label = 'Create Collect & Escape game';
+    data = { templateId: 'collect-escape', projectId: next.id };
+  } else if (toolName === 'studio_list_game_build_profiles') {
+    data = { defaultBuildProfileId: next.defaultBuildProfileId, profiles: structuredClone(next.buildProfiles) };
+  } else if (toolName === 'studio_prepare_game_build') {
+    const profileId = typeof record.profileId === 'string' ? record.profileId : next.defaultBuildProfileId;
+    const profile = next.buildProfiles.find((entry) => entry.id === profileId);
+    if (!profile) return gameToolFailure(validation.project, currentRevision, toolName, 'not-found', `Build profile "${profileId}" does not exist.`);
+    data = { action: { type: 'build.offline-zip', projectId: next.id, projectRevision: currentRevision, profile: structuredClone(profile), approval: 'required' } };
+  }
+
+  const changed = JSON.stringify(next) !== JSON.stringify(validation.project);
+  return {
+    protocol: 'threejs-studio.game-authoring', protocolVersion: 1, toolName,
+    ok: true, changed, baseRevision: currentRevision, revision: changed ? currentRevision + 1 : currentRevision,
+    project: structuredClone(next), data: data as T, errors: [], warnings: [],
+    ...(changed ? { history: { strategy: 'commit-v5-project-snapshot' as const, label, inverse: structuredClone(validation.project) } } : {}),
+  };
 }
