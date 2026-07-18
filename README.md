@@ -48,6 +48,19 @@ npm run build
 npm test
 ```
 
+## Deploy to Cloudflare
+
+Production hosting uses an asset-only Cloudflare Worker. The apex custom domain, caching policy, and asset directory are declared in `wrangler.jsonc`; public source maps are disabled.
+
+```bash
+npm ci
+npm run check
+npm run cloudflare:dry-run
+npm run deploy:cloudflare
+```
+
+`deploy:cloudflare` runs a clean production build before publishing. The authenticated Cloudflare account must own the active `threejs.studio` zone.
+
 ## Editor controls
 
 | Action | Control |
