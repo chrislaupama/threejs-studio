@@ -1,0 +1,13 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "threejs-studio-www",
+  "main": "./cloudflare/www-redirect.ts",
+  "compatibility_date": "2026-07-18",
+  "workers_dev": false,
+  "routes": [
+    {
+      "pattern": "www.threejs.studio",
+      "custom_domain": true
+    }
+  ]
+}

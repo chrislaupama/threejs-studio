@@ -34,6 +34,29 @@ The checkpoint also includes the shadcn/Base UI foundation, a mounted Game Autho
 
 Collect & Escape now runs through a versioned manifest adapter in editor Play and through an equivalent specialized adapter in the offline ZIP. Both cover movement, Rapier collision/sensors, pickups, score/countdown, exit win/fail/restart, HUD/touch controls, and cleanup. It is still a partial vertical slice: the authored TypeScript bundle is packaged but not executed, Play and export use separate implementations, and current Play is not hosted in the opaque iframe.
 
+## Next milestone — script-driven runtime convergence
+
+The next release proof is not another isolated engine feature. It is one authored TypeScript behavior driving Collect & Escape through the opaque preview host and the exact same compiled runtime in the offline build.
+
+### Stabilization gate
+
+Completed on 2026-07-20:
+
+1. Compatibility scene commits merge projected `axis2d` controls while preserving non-projectable `button`/`axis1d` actions, dead zones, and pointer/touch/gamepad bindings. Human Inspector and typed-agent browser journeys prove exact preservation and one-step Undo.
+2. One `@threejs-studio/sdk` contract now supplies runtime-facing types, Monaco's declaration, esbuild's allowlisted module, and bundled behavior templates. The exact default and Collect & Escape sources have zero TypeScript semantic diagnostics and compile unchanged; executing those bundles remains part of runtime convergence.
+3. The repository now has a release workflow for typecheck, production build, browserless contracts, desktop Chromium, focused mobile WebKit, axe, reviewed macOS visuals, and a built production-preview smoke. The corresponding local gate passes without replacing visual baselines.
+
+### Delivery sequence
+
+1. Replace direct durable mutations and the v4 compatibility executor with one v5-native, revision-checked command registry for both human and agent authoring. Coordinate project, source, and binary revisions atomically.
+2. Compile registry-backed input, physics, behavior, state/event, runtime-UI, permissions, assets, and build settings into a deterministic runtime snapshot.
+3. Execute content-hashed behavior bundles only in `RuntimePreviewHost`, with exposed Inspector properties, source-linked diagnostics, stale-build cancellation, last-known-good reload, watchdog termination, and complete disposal.
+4. Make the secure host the sole Play/Preview path, then package its exact runtime modules, snapshot, behaviors, generic runtime UI, model bytes, Rapier, and decoders into the offline build.
+5. Prove deterministic Play/export checkpoints for transforms, collisions, events, score, timer, UI, win/fail, restart, Pause/Step/Stop, reopen, keyboard, touch, and gamepad. Serve the real ZIP from a nested path with networking disabled.
+6. Mount the persisted shadcn workspace shell and migrate Hierarchy/Inspector first, including complete tree keyboard semantics, before finishing Input, Physics, State/Event, Runtime UI, Permissions, and Build settings with typed AI parity.
+
+Multi-scene authoring, full prefab workflows, animation, audio, VFX, visual graphs, plugins, and collaboration remain deferred until this parity gate passes.
+
 ## Phase 0 — Shadcn/Base UI editor foundation
 
 ### Integrated

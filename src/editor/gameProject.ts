@@ -130,18 +130,83 @@ export function createLegacySceneView(project: ProjectDocumentV5, sceneId = proj
   };
 }
 
+function mergeInputBindings(
+  action: ProjectDocument['inputActions'][number],
+  previous?: InputActionV5,
+): InputActionV5['bindings'] {
+  const keyboardBindings: InputActionV5['bindings'] = action.bindings.map((binding) => ({
+    ...structuredClone(binding),
+    device: 'keyboard' as const,
+  }));
+  if (!previous) return keyboardBindings;
+
+  let lastKeyboardIndex = -1;
+  for (let index = previous.bindings.length - 1; index >= 0; index -= 1) {
+    if (previous.bindings[index]?.device === 'keyboard') {
+      lastKeyboardIndex = index;
+      break;
+    }
+  }
+  if (lastKeyboardIndex < 0) {
+    return [
+      ...keyboardBindings,
+      ...structuredClone(previous.bindings),
+    ];
+  }
+
+  let keyboardIndex = 0;
+  const bindings: InputActionV5['bindings'] = [];
+  previous.bindings.forEach((binding, index) => {
+    if (binding.device === 'keyboard') {
+      const replacement = keyboardBindings[keyboardIndex];
+      if (replacement) bindings.push(replacement);
+      keyboardIndex += 1;
+      if (index === lastKeyboardIndex) bindings.push(...keyboardBindings.slice(keyboardIndex));
+      return;
+    }
+    bindings.push(structuredClone(binding));
+  });
+  return bindings;
+}
+
 function mergeInputAction(action: ProjectDocument['inputActions'][number], previous?: InputActionV5): InputActionV5 {
-  const preservedBindings = previous?.bindings.filter((binding) => binding.device !== 'keyboard') ?? [];
+  const preserved = previous?.type === 'axis2d' ? structuredClone(previous) : undefined;
   return {
+    ...preserved,
     id: action.id,
     name: action.name,
     type: action.type,
-    deadZone: previous?.deadZone ?? 0,
-    bindings: [
-      ...action.bindings.map((binding) => ({ ...structuredClone(binding), device: 'keyboard' as const })),
-      ...structuredClone(preservedBindings),
-    ],
+    deadZone: preserved?.deadZone ?? 0,
+    bindings: mergeInputBindings(action, preserved),
   };
+}
+
+function mergeInputActions(
+  previous: InputActionV5[],
+  legacy: ProjectDocument['inputActions'],
+): InputActionV5[] {
+  const hiddenActionIds = new Set(previous
+    .filter((action) => action.type !== 'axis2d')
+    .map((action) => action.id));
+  const hiddenCollision = legacy.find((action) => hiddenActionIds.has(action.id));
+  if (hiddenCollision) {
+    throw new Error(
+      `Legacy Input Action "${hiddenCollision.id}" conflicts with a non-projectable v5 action.`,
+    );
+  }
+
+  const legacyById = new Map(legacy.map((action) => [action.id, action]));
+  const previousIds = new Set(previous.map((action) => action.id));
+  return [
+    ...previous.flatMap((action) => {
+      if (action.type !== 'axis2d') return [structuredClone(action)];
+      const projected = legacyById.get(action.id);
+      return projected ? [mergeInputAction(projected, action)] : [];
+    }),
+    ...legacy
+      .filter((action) => !previousIds.has(action.id))
+      .map((action) => mergeInputAction(action)),
+  ];
 }
 
 function mergeEntity(node: SceneNode, sceneId: string, previous?: EntityV5): EntityV5 {
@@ -231,8 +296,7 @@ export function syncLegacySceneToV5(
     priority: 0,
     actions: [],
   };
-  const previousActions = new Map(currentMap.actions.map((action) => [action.id, action]));
-  currentMap.actions = legacy.inputActions.map((action) => mergeInputAction(action, previousActions.get(action.id)));
+  currentMap.actions = mergeInputActions(currentMap.actions, legacy.inputActions);
   if (next.inputMaps.length) next.inputMaps[resolvedIndex] = currentMap;
   else next.inputMaps.push(currentMap);
 

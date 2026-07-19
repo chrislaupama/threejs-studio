@@ -54,7 +54,7 @@ flowchart LR
 - v1–v4 documents load through their strict loaders and migrate to v5.
 - v5 documents fail closed when malformed; they do not fall through to legacy migration.
 - `createLegacySceneView` derives the active scene for the existing Hierarchy, Inspector, and viewport.
-- `syncLegacySceneToV5` merges legacy scene edits back without discarding other scenes, non-model assets, prefabs, UI documents, or generalized bindings.
+- `syncLegacySceneToV5` merges legacy scene edits back without discarding other scenes, non-model assets, prefabs, UI documents, or generalized bindings. Projected `axis2d` controls retain dead zones and non-keyboard bindings; non-projectable `button` and `axis1d` actions remain exact and ordered. Hidden-action ID collisions fail before mutation.
 
 This adapter keeps existing controls working, but new v5 domains must not be flattened through the scene view.
 
@@ -110,7 +110,7 @@ Status terms:
 | Multiple scenes and layers | Startup scene through legacy view | No v5 mutation tool | Foundation; schema/validation/preservation exist, editing and runtime transitions do not. |
 | Prefabs/overrides/variants | No | No | Schema foundation only. |
 | General asset union | Scripts integrated; models compatible | Script tools only | Partial; transactional importers/source revisions are still required. |
-| Script source | Monaco create/edit/save | List/read/upsert/delete | Integrated source-authoring slice with code approval and Undo; runtime execution/hot reload is not integrated. |
+| Script source | Monaco create/edit/save | List/read/upsert/delete | Integrated source-authoring slice with code approval and Undo. Monaco, esbuild, bundled templates, and runtime-facing SDK types share `@threejs-studio/sdk`; runtime execution/hot reload is not integrated. |
 | Variables/events/game state | Template data runs through the v1 adapter | No | Partial runtime slice; needs general operations, panels/tools, and script/graph orchestration. |
 | Physics | Collect-style manifest runs in Play/export | No | Partial Rapier slice; needs registry components, Inspector/debug authoring, tools, and a general shared runtime. |
 | Runtime game UI | Summary plus mounted Collect HUD in Play | No | Partial; the generic renderer runs in editor Play, while export uses a specialized HUD. Visual authoring and parity remain open. |
@@ -153,6 +153,8 @@ Adding a model or transport must never create a more privileged mutation path th
 - A browser test proves the authored result is visible.
 - Approval boundaries cover files, code, permissions, destructive changes, and external communication.
 - Play/export support and this capability matrix are updated.
+
+The release workflow runs typecheck, production build, browserless contracts, desktop Chromium, focused mobile WebKit, axe coverage, reviewed Darwin visual comparisons, and a built production-preview smoke. Human and typed-agent compatibility commits have a browser regression proving generalized input preservation and exact one-step Undo. The default and Collect & Escape behavior sources are checked against the same Monaco declaration and esbuild virtual module used by the editor.
 
 ## Next convergence work
 

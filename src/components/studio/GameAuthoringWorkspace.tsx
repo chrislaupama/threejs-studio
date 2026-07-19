@@ -17,6 +17,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { listProjectScripts, upsertProjectScript } from '@/editor/gameAuthoring';
 import type { ProjectDocumentV5 } from '@/editor/types';
+import { DEFAULT_BEHAVIOR_SOURCE } from '@/scripting/studioSdkContract';
 import {
   ScriptWorkspace,
   type ScriptWorkspaceDiagnostic,
@@ -37,18 +38,6 @@ export interface GameAuthoringWorkspaceProps {
   onPlay: () => void;
   onClose: () => void;
 }
-
-const NEW_BEHAVIOR_SOURCE = `import { defineBehavior } from '@threejs-studio/sdk';
-
-export default defineBehavior({
-  name: 'New Behavior',
-  schema: {},
-  onStart(ctx) {
-    ctx.api.log.info('Behavior started', { entityId: ctx.self.id });
-  },
-  onFixedUpdate(_ctx) {},
-});
-`;
 
 function draftsFromProject(project: ProjectDocumentV5): DraftScript[] {
   return listProjectScripts(project).map((script) => ({
@@ -94,7 +83,7 @@ export function GameAuthoringWorkspace({
       assetId: id,
       path: `scripts/behavior${index}.ts`,
       language: 'typescript',
-      source: NEW_BEHAVIOR_SOURCE,
+      source: DEFAULT_BEHAVIOR_SOURCE,
       originalSource: '',
       dirty: true,
     };

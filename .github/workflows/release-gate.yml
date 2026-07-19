@@ -1,0 +1,151 @@
+name: Release gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Types, build, and contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Build production assets
+        run: npm run build
+
+      - name: Run fast contract tests
+        run: npm run test:contracts
+        env:
+          PLAYWRIGHT_ARTIFACT_NAME: contracts
+
+      - name: Upload contract test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: contract-test-report
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: warn
+          retention-days: 7
+
+  browsers:
+    name: Desktop Chromium and mobile WebKit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Build production preview
+        id: production-build
+        run: npm run build
+
+      - name: Install browser runtimes
+        id: browser-install
+        run: npx playwright install --with-deps chromium webkit
+
+      - name: Run desktop browser and accessibility tests
+        run: npm run test:browser:desktop
+        env:
+          PLAYWRIGHT_ARTIFACT_NAME: desktop-chromium
+
+      - name: Run focused mobile WebKit tests
+        if: ${{ !cancelled() && steps.browser-install.outcome == 'success' }}
+        run: npm run test:browser:mobile
+        env:
+          PLAYWRIGHT_ARTIFACT_NAME: mobile-webkit
+
+      - name: Smoke test production preview
+        if: ${{ !cancelled() && steps.production-build.outcome == 'success' && steps.browser-install.outcome == 'success' }}
+        run: npm run test:preview
+        env:
+          PLAYWRIGHT_ARTIFACT_NAME: production-preview
+
+      - name: Upload browser test report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: browser-test-report
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: warn
+          retention-days: 7
+
+  reviewed-visuals:
+    name: Reviewed Darwin visual baselines
+    # Baselines were reviewed on arm64 macOS 26; the generic "darwin" suffix
+    # alone is not sufficient to make screenshots portable across macOS releases.
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Install baseline browser runtimes
+        run: npx playwright install chromium webkit
+
+      - name: Compare reviewed visual baselines
+        run: npm run verify:visual -- --retries=0
+        env:
+          PLAYWRIGHT_ARTIFACT_NAME: darwin-visuals
+
+      - name: Upload visual comparison report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: darwin-visual-test-report
+          path: |
+            playwright-report
+            test-results
+          if-no-files-found: warn
+          retention-days: 7

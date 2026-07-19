@@ -15,10 +15,16 @@
     "build": "tsc && vite build",
     "predeploy:cloudflare": "npm run build",
     "deploy:cloudflare": "wrangler deploy --strict",
+    "deploy:cloudflare:www": "wrangler deploy --config wrangler.www.jsonc --strict",
     "cloudflare:dry-run": "wrangler deploy --dry-run",
+    "cloudflare:www:dry-run": "wrangler deploy --config wrangler.www.jsonc --dry-run",
     "preview": "vite preview --host 127.0.0.1",
     "test": "playwright test",
-    "verify:visual": "playwright test tests/visual.spec.ts",
+    "test:contracts": "playwright test --config=playwright.contracts.config.ts",
+    "test:browser:desktop": "playwright test tests/agent-game-browser.spec.ts tests/assistant-integration.spec.ts tests/build-pipeline.spec.ts tests/build-transaction-ui.spec.ts tests/game-authoring-runtime.spec.ts tests/identity.spec.ts tests/project-game-runtime.spec.ts tests/runtime-ai-lifecycle.spec.ts tests/runtime-preview-host.spec.ts tests/runtime-ui.spec.ts tests/scripting.spec.ts tests/shadcn-accessibility.spec.ts tests/standalone-runtime.spec.ts tests/studio-sdk-contract.spec.ts tests/visual.spec.ts --project=desktop-chrome",
+    "test:browser:mobile": "playwright test tests/assistant-integration.spec.ts tests/build-transaction-ui.spec.ts tests/project-game-runtime.spec.ts tests/runtime-preview-host.spec.ts tests/runtime-ui.spec.ts tests/scripting.spec.ts tests/shadcn-accessibility.spec.ts tests/visual.spec.ts --project=mobile-safari",
+    "test:preview": "playwright test --config=playwright.preview.config.ts",
+    "verify:visual": "playwright test tests/visual-regression.spec.ts",
     "inspect:canvas": "node scripts/inspect-threejs-canvas.mjs"
   },
   "dependencies": {

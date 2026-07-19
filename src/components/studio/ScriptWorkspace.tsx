@@ -7,6 +7,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { Spinner } from '@/components/ui/spinner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { loadStudioMonaco } from './monacoSdk';
 
 export interface ScriptWorkspaceFile {
   id: string;
@@ -36,39 +37,6 @@ export interface ScriptWorkspaceProps {
   onChangeFile: (fileId: string, source: string) => void;
   onSaveFile: (fileId: string) => void;
   onOpenDiagnostic?: (diagnostic: ScriptWorkspaceDiagnostic) => void;
-}
-
-const studioSdkDeclaration = `
-declare module '@threejs-studio/runtime' {
-  export type Vec3 = readonly [number, number, number];
-  export interface BehaviorContext {
-    readonly entityId: string;
-    readonly time: { readonly delta: number; readonly fixedDelta: number; readonly elapsed: number };
-    input: { value(actionId: string): number | Vec3; pressed(actionId: string): boolean };
-    variables: { get(name: string): unknown; set(name: string, value: unknown): void };
-    events: { emit(name: string, payload?: Record<string, unknown>): void };
-    transform: { position(): Vec3; setPosition(value: Vec3): void; translate(value: Vec3): void };
-  }
-  export interface BehaviorDefinition {
-    schema?: Record<string, unknown>;
-    onStart?(context: BehaviorContext): void;
-    onFixedUpdate?(context: BehaviorContext): void;
-    onUpdate?(context: BehaviorContext): void;
-    onEvent?(context: BehaviorContext, event: { name: string; payload?: Record<string, unknown> }): void;
-    onDestroy?(context: BehaviorContext): void;
-  }
-  export function defineBehavior(definition: BehaviorDefinition): BehaviorDefinition;
-}
-`;
-
-interface MonacoTypeScriptApi {
-  typescriptDefaults: {
-    setCompilerOptions(options: Record<string, unknown>): void;
-    addExtraLib(source: string, path: string): { dispose(): void };
-  };
-  ModuleKind: { ESNext: number };
-  ModuleResolutionKind: { NodeJs: number };
-  ScriptTarget: { ES2022: number };
 }
 
 function diagnosticLocation(diagnostic: ScriptWorkspaceDiagnostic) {
@@ -111,27 +79,11 @@ export function ScriptWorkspace({
     setLoading(true);
     setLoadError(null);
 
-    void import('./monacoEnvironment').then(({ configureMonacoEnvironment }) => {
-      configureMonacoEnvironment();
-      return Promise.all([
-        import('monaco-editor'),
-        import('monaco-editor/esm/vs/language/typescript/monaco.contribution.js'),
-      ]);
-    }).then(([monaco]) => {
-      if (cancelled) return;
-      const typescript = (monaco.languages as unknown as { typescript: MonacoTypeScriptApi }).typescript;
-      typescript.typescriptDefaults.setCompilerOptions({
-        allowNonTsExtensions: true,
-        module: typescript.ModuleKind.ESNext,
-        moduleResolution: typescript.ModuleResolutionKind.NodeJs,
-        strict: true,
-        target: typescript.ScriptTarget.ES2022,
-        noEmit: true,
-      });
-      const sdk = typescript.typescriptDefaults.addExtraLib(
-        studioSdkDeclaration,
-        'file:///node_modules/@threejs-studio/runtime/index.d.ts',
-      );
+    void loadStudioMonaco().then(({ monaco, disposeSdk }) => {
+      if (cancelled) {
+        disposeSdk();
+        return;
+      }
       const uri = monaco.Uri.parse(`file:///${activeFile.path.replace(/^\/+/, '')}`);
       const model = monaco.editor.getModel(uri) ?? monaco.editor.createModel(
         activeFile.source,
@@ -161,7 +113,7 @@ export function ScriptWorkspace({
       disposeEditor = () => {
         contentSubscription.dispose();
         editor.dispose();
-        sdk.dispose();
+        disposeSdk();
       };
       setLoading(false);
       editor.focus();

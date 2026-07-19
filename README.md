@@ -45,21 +45,38 @@ Checks:
 ```bash
 npm run check
 npm run build
-npm test
+npm run test:contracts
+npm run test:browser:desktop
+npm run test:browser:mobile
+npm run build && npm run test:preview
+npm run verify:visual
 ```
+
+`npm test` remains the complete local Playwright run across both configured browser profiles. The targeted commands above mirror the release CI gate: browserless contracts run once without starting Vite or requiring an installed browser, desktop Chromium carries the complete editor/browser and axe coverage, mobile WebKit repeats the cross-browser responsive, touch, runtime-UI, secure-preview, script-sandbox, Assistant, and accessibility journeys, and the preview smoke boots the built hashed assets before exercising Play and Stop.
+
+The reviewed screenshot suite is `tests/visual-regression.spec.ts`. Its committed baselines were captured on arm64 macOS 26, so CI compares them on the matching `macos-26` runner family and never updates snapshots automatically. Review visual changes locally on macOS 26 before committing refreshed baselines:
+
+```bash
+npm run verify:visual -- --update-snapshots=all
+npm run verify:visual
+```
+
+Playwright retains traces and screenshots for failures, with video recorded on the first retry in CI. CI fails tests that pass only on retry and publishes isolated HTML/JUnit reports and failure artifacts for seven days.
 
 ## Deploy to Cloudflare
 
-Production hosting uses an asset-only Cloudflare Worker. The apex custom domain, caching policy, and asset directory are declared in `wrangler.jsonc`; public source maps are disabled.
+Production hosting uses an asset-only Cloudflare Worker. The apex custom domain, caching policy, and asset directory are declared in `wrangler.jsonc`; public source maps are disabled. A separate minimal Worker declared in `wrangler.www.jsonc` permanently redirects `www.threejs.studio` to the canonical apex while preserving paths and query strings.
 
 ```bash
 npm ci
 npm run check
 npm run cloudflare:dry-run
 npm run deploy:cloudflare
+npm run cloudflare:www:dry-run
+npm run deploy:cloudflare:www
 ```
 
-`deploy:cloudflare` runs a clean production build before publishing. The authenticated Cloudflare account must own the active `threejs.studio` zone.
+`deploy:cloudflare` runs a clean production build before publishing. The `www` Worker can be deployed independently and does not replace the editor Worker. The authenticated Cloudflare account must own the active `threejs.studio` zone.
 
 ## Editor controls
 

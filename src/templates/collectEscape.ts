@@ -2,6 +2,7 @@ import { defineGameplayEvent } from '../gameplay/events';
 import type { InputActionMap } from '../gameplay/input';
 import type { PhysicsRigidBodyDefinition } from '../gameplay/physics';
 import type { UIDocument } from '../runtime-ui/types';
+import { STUDIO_SDK_MODULE_ID } from '../scripting/studioSdkContract';
 import type {
   DataAssetRecordV5,
   EntityV5,
@@ -102,7 +103,7 @@ const mesh = (
  * it through scriptAssetId + entryPoint. Import/build transactions can replace
  * both records atomically without inventing a browser object or object URL.
  */
-export const COLLECT_ESCAPE_BEHAVIOR_SOURCE = String.raw`import { defineBehavior } from '@threejs-studio/sdk';
+export const COLLECT_ESCAPE_BEHAVIOR_SOURCE = String.raw`import { defineBehavior } from '${STUDIO_SDK_MODULE_ID}';
 
 type RoundState = 'playing' | 'won' | 'failed';
 

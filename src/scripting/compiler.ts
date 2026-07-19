@@ -17,6 +17,10 @@ import type {
   ScriptDiagnosticNote,
 } from './compilerProtocol';
 import {
+  STUDIO_SDK_MODULE_ID,
+  STUDIO_SDK_RUNTIME_MODULE_SOURCE,
+} from './studioSdkContract';
+import {
   normalizeVirtualPath,
   resolveVirtualImport,
   createVirtualProjectSnapshot,
@@ -24,15 +28,9 @@ import {
   type VirtualProjectSnapshot,
 } from './virtualFileSystem';
 
-export const STUDIO_SDK_MODULE_ID = '@threejs-studio/sdk';
 const STUDIO_SDK_INTERNAL_PATH = '/__threejs_studio__/sdk.js';
 
-const SDK_RUNTIME_MODULE = `
-export const BEHAVIOR_API_VERSION = 1;
-export function defineBehavior(definition) {
-  return Object.freeze({ ...definition, apiVersion: BEHAVIOR_API_VERSION });
-}
-`;
+export { STUDIO_SDK_MODULE_ID } from './studioSdkContract';
 
 export interface EsbuildCompilerAdapter {
   readonly version: string;
@@ -244,7 +242,7 @@ function createVirtualFilePlugin(snapshot: VirtualProjectSnapshot, dependencies:
       });
 
       build.onLoad({ filter: /.*/, namespace: 'studio-sdk' }, () => ({
-        contents: SDK_RUNTIME_MODULE,
+        contents: STUDIO_SDK_RUNTIME_MODULE_SOURCE,
         loader: 'js',
       }));
 

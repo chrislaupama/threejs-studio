@@ -56,9 +56,9 @@ The authoritative-project migration has landed, but runtime convergence is incom
 ### Integrated path
 
 - `src/App.tsx` owns authoritative v5 persistence, revision/history snapshots, portable packages, game script commits, template replacement, and builds.
-- `src/editor/gameProject.ts` derives the active scene as a schema-v4 compatibility view and merges legacy scene edits back into v5 without dropping v5-only records.
+- `src/editor/gameProject.ts` derives the active scene as a schema-v4 compatibility view and merges legacy scene edits back into v5 without dropping v5-only records. The merge preserves hidden button/axis1d actions and non-keyboard axis2d bindings, and rejects hidden-ID collisions atomically.
 - `GameAuthoringWorkspace` is mounted from the activity rail and provides shadcn/Base UI Scripts, Input, Game UI, and Build tabs.
-- Monaco Save uses a pure v5 script operation, an executable-code approval dialog, full validation, normal history, autosave, and one-step Undo.
+- Monaco Save uses a pure v5 script operation, an executable-code approval dialog, full validation, normal history, autosave, and one-step Undo. Monaco and esbuild consume the same `@threejs-studio/sdk` contract and exact starter sources.
 - `ViewportEngine` prepares a disposable v5 `ProjectGameRuntime` when a project carries `threejs-studio.runtime-bindings.v1`, then drives it through `RuntimeSession`. The controller runs generalized input, Rapier, gameplay state/events, transforms/visibility, and the generic runtime-UI HUD without mutating authored data.
 - Play supports the Collect & Escape core loop through keyboard, pointer/touch HUD controls, and gamepad polling; Pause/Step/restart/Stop retain fixed-tick and cleanup semantics. Projects without a runtime-binding manifest retain Rotate, Float, and Keyboard Move compatibility.
 - The primary Build command produces a deterministic offline ZIP from the v5 snapshot, local Three.js/Rapier/runtime files, compiled project-script output, available model sources, and a local HUD stylesheet.
@@ -79,7 +79,7 @@ The authoritative-project migration has landed, but runtime convergence is incom
 | `gameplay/physics.ts` | Rapier world/body/collider/sensor wrapper used by editor Play's v1 adapter | Registry entity components, full character controller, Inspector/debug UI, general runtime compilation |
 | `gameplay/events.ts` / `state.ts` | Typed events, variables, queues, objectives/score/timers used by editor Play's v1 adapter | V5 operations, panels/tools, save schema, authored script/graph orchestration |
 | `runtime-ui/` | Hardened accessible DOM/CSS renderer mounted for the editor's Collect HUD | Visual authoring, generalized binding adapters, and offline-runtime reuse |
-| `scripting/` | SDK, virtual file system, esbuild-wasm compiler Worker/client, sandbox document/protocol | Script component instances, execution/hot reload/debugging in the shared runtime |
+| `scripting/` | Canonical `@threejs-studio/sdk` types/declaration/compiler shim/templates, virtual file system, esbuild-wasm compiler Worker/client, sandbox document/protocol | Script component instances, execution/hot reload/debugging in the shared runtime |
 | `build/` | Deterministic ZIP, script packaging, local Three.js/Rapier modules, specialized offline Collect adapter/HUD | Model decoding, compiled behavior execution, generic runtime UI, exact Play/export parity |
 | `components/studio/workspace/` | Serializable split-tree/panel registry, desktop/mobile shell components, preference sync tests | Replace the current hand-built workbench as the default shell |
 
@@ -164,7 +164,7 @@ It omits `allow-same-origin`, applies a network-dark CSP, transfers initializati
 
 The scripting package defines a Studio SDK, bounded virtual file system, worker-based `esbuild-wasm` compilation, diagnostic/source-map/content-hash results, and an opaque sandbox protocol. Behavior code is intended to use lifecycle hooks such as `onStart`, `onFixedUpdate`, `onUpdate`, actions/events/collisions, and `onDestroy` through stable serializable handles.
 
-Monaco source persistence and build-time compilation are integrated. The v1 runtime adapter reads behavior-binding properties such as movement speed, but it does **not** load or execute the authored source or compiled bundle. Runtime script execution, component attachment, SDK autocomplete wiring, last-known-good hot reload in Play, watchdog termination, source-linked logs, and debugger features are not integrated.
+Monaco source persistence, SDK-aware semantic analysis/autocomplete, and build-time compilation are integrated. The editor, compiler, and bundled templates share the `@threejs-studio/sdk` module and `ctx.api.*` context shape. The v1 runtime adapter reads behavior-binding properties such as movement speed, but it does **not** load or execute the authored source or compiled bundle. Runtime script execution, component attachment, last-known-good hot reload in Play, watchdog termination, source-linked logs, and debugger features are not integrated.
 
 Remote URLs, `file:` imports, dynamic remote imports, and undeclared npm packages remain disallowed. Executable-code changes and new permissions require visible approval.
 
@@ -239,3 +239,5 @@ Acceptance still requires deterministic checkpoints for initial state, pickup co
 8. Finish multi-scene/prefab/content workflows, professional workspaces, profiling, and ecosystem features.
 
 Release gates test the complete playable artifact and human/AI contract parity, not the presence of panels or data fixtures alone.
+
+The first repository gate is now encoded in GitHub Actions and mirrored by local commands: typecheck/build, browserless contracts, desktop Chromium, focused mobile WebKit, axe, reviewed macOS visuals, and a production-preview boot/Play/Stop smoke. This infrastructure gate does not yet substitute for the future Play/export checkpoint and hostile-script/leak gates.

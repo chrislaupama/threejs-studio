@@ -10,7 +10,16 @@ interface V5ProjectSnapshot {
     scenes: Array<{ id: string; name: string }>;
     entities: Array<{ id: string; name: string }>;
     assets: Array<{ id: string; kind: string; name: string }>;
-    inputMaps: Array<{ id: string; actions: Array<{ id: string }> }>;
+    inputMaps: Array<{
+      id: string;
+      actions: Array<{
+        id: string;
+        name: string;
+        type: 'button' | 'axis1d' | 'axis2d';
+        deadZone: number;
+        bindings: Array<{ id: string; device: string; [key: string]: unknown }>;
+      }>;
+    }>;
     ui: { documents: Array<{ id: string }> };
   };
 }
@@ -137,4 +146,73 @@ test('authoritative V5 game tool requires review, applies visibly, and restores 
   expect(undone.project).toEqual(before.project);
   expect(consoleErrors).toEqual([]);
   expect(pageErrors).toEqual([]);
+});
+
+test('legacy agent commits preserve generalized V5 input and restore it in one Undo', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop-chrome', 'The authoritative compatibility merge needs one desktop browser pass.');
+  await openFresh(page);
+  const before = await snapshot(page);
+
+  const templateProposal = await page.evaluate(async ({ baseRevision }) => {
+    const bridge = window.__THREEJS_STUDIO_AGENT__;
+    if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
+    return bridge.request({
+      tool: 'studio_create_collect_escape',
+      arguments: {},
+      baseRevision,
+      requestId: 'qa-input-preservation-template',
+    });
+  }, { baseRevision: before.revision });
+  expect(templateProposal).toMatchObject({ status: 'approval_required' });
+  await page.getByTestId('assistant-approve').click();
+  await expect(page.getByTestId('assistant-proposal')).toBeHidden();
+
+  const authored = await snapshot(page);
+  const authoredInputMaps = structuredClone(authored.project.inputMaps);
+  expect(authoredInputMaps.flatMap((map) => map.actions)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: 'move', type: 'axis2d', deadZone: 0.16 }),
+    expect.objectContaining({ id: 'interact', type: 'button' }),
+    expect.objectContaining({ id: 'restart', type: 'button' }),
+  ]));
+  expect(authoredInputMaps.flatMap((map) => map.actions)
+    .find((action) => action.id === 'move')?.bindings
+    .some((binding) => binding.device === 'touch')).toBe(true);
+
+  await page.getByRole('button', { name: 'Close game authoring workspace' }).click();
+  await page.getByRole('button', { name: 'Inspector', exact: true }).click();
+  await expect(page.getByTestId('inspector-name')).toHaveValue('Player');
+  await page.getByTestId('inspector-name').fill('Human-renamed player');
+  await expect.poll(async () => (await snapshot(page)).project.entities
+    .find((entity) => entity.id === 'entity.player')?.name).toBe('Human-renamed player');
+  const humanEdited = await snapshot(page);
+  expect(humanEdited.project.inputMaps).toEqual(authoredInputMaps);
+
+  await page.getByRole('button', { name: 'Undo Rename object' }).click();
+  const humanUndone = await snapshot(page);
+  expect(humanUndone.project).toEqual(authored.project);
+  expect(humanUndone.revision).toBeGreaterThan(humanEdited.revision);
+
+  const editProposal = await page.evaluate(async ({ baseRevision }) => {
+    const bridge = window.__THREEJS_STUDIO_AGENT__;
+    if (!bridge) throw new Error('Studio Agent browser bridge is unavailable.');
+    return bridge.request({
+      tool: 'studio_update_node',
+      arguments: { nodeId: 'entity.player', name: 'Agent-renamed player' },
+      baseRevision,
+      requestId: 'qa-input-preservation-legacy-edit',
+    });
+  }, { baseRevision: humanUndone.revision });
+  expect(editProposal).toMatchObject({ status: 'approval_required' });
+  await page.getByTestId('assistant-approve').click();
+  await expect(page.getByTestId('assistant-proposal')).toBeHidden();
+
+  const edited = await snapshot(page);
+  expect(edited.project.entities.find((entity) => entity.id === 'entity.player')?.name).toBe('Agent-renamed player');
+  expect(edited.project.inputMaps).toEqual(authoredInputMaps);
+
+  await expect(page.getByTestId('assistant-undo')).toBeVisible();
+  await page.getByTestId('assistant-undo').click();
+  const undone = await snapshot(page);
+  expect(undone.project).toEqual(authored.project);
+  expect(undone.revision).toBeGreaterThan(edited.revision);
 });
