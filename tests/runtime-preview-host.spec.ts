@@ -6,6 +6,12 @@ import {
   RUNTIME_PREVIEW_TRANSPORT,
   RUNTIME_PREVIEW_TRANSPORT_VERSION,
 } from '../src/runtime/RuntimePreviewHost';
+import {
+  createAuthoredBehaviorPreviewSource,
+  createBehaviorPreviewSnapshot,
+} from '../src/runtime/behaviorPreviewRuntime';
+import { sha256Hex } from '../src/build';
+import { createCollectEscapeProject } from '../src/templates/collectEscape';
 
 const identity = {
   sessionId: 'preview-session-1',
@@ -145,6 +151,109 @@ test('mounts an opaque network-dark iframe and drives typed lifecycle commands',
 
   await page.evaluate(async () => {
     const host = (window as unknown as Window & { __runtimePreviewHost: { dispose(): Promise<void> } }).__runtimePreviewHost;
+    await host.dispose();
+  });
+  await expect(page.locator('[data-threejs-studio-runtime-preview]')).toHaveCount(0);
+});
+
+test('executes compiled behavior hooks in the opaque preview worker', async ({ page }) => {
+  await page.goto('/');
+  const moduleCode = `
+globalThis.__AUTHORED_BEHAVIOR_WORKER_ONLY__ = true;
+Object.keys = () => { throw new Error('sandbox intrinsic leak'); };
+Array.prototype.sort = () => { throw new Error('sandbox intrinsic leak'); };
+export default {
+  name: 'Preview Worker Probe',
+  schema: { marker: { type: 'string', default: 'started-in-worker' } },
+  onStart(ctx) {
+    ctx.api.variables.set('workerMarker', ctx.properties.marker);
+    ctx.api.variables.set('timeFrozen', Object.isFrozen(ctx.time));
+    try { ctx.time.tick = 999; } catch {}
+    ctx.api.variables.set('timeMutationBlocked', ctx.time.tick === 0);
+  },
+  onFixedUpdate(ctx) {
+    ctx.api.variables.set('workerTicks', Number(ctx.api.variables.get('workerTicks') ?? 0) + 1);
+  },
+};
+`;
+  const behaviorIdentity = {
+    sessionId: 'authored-behavior-preview',
+    revision: 23,
+    buildHash: await sha256Hex(new TextEncoder().encode(moduleCode)),
+  };
+  const runtimeSource = createAuthoredBehaviorPreviewSource({
+    moduleCode,
+    contentHash: behaviorIdentity.buildHash,
+    projectRevision: behaviorIdentity.revision,
+  }, createBehaviorPreviewSnapshot(createCollectEscapeProject()));
+
+  const frameName = await page.evaluate(async ({ identity: runtimeIdentity, source }) => {
+    const modulePath = '/src/runtime/RuntimePreviewHost.ts';
+    const { RuntimePreviewHost } = await import(/* @vite-ignore */ modulePath) as typeof import('../src/runtime/RuntimePreviewHost');
+    const container = document.createElement('section');
+    document.body.append(container);
+    const host = new RuntimePreviewHost({
+      container,
+      identity: runtimeIdentity,
+      runtimeSource: source,
+      hidden: true,
+      diagnosticsThrottleMs: 0,
+    });
+    await host.mount();
+    await host.start();
+    Object.assign(window, { __authoredBehaviorPreviewHost: host });
+    return host.element!.name;
+  }, { identity: behaviorIdentity, source: runtimeSource });
+
+  const frame = page.frame({ name: frameName });
+  expect(frame).not.toBeNull();
+  await expect.poll(() => frame!.evaluate(() => {
+    const status = (
+      globalThis as typeof globalThis & {
+        __THREEJS_STUDIO_AUTHORED_BEHAVIOR_STATUS__?: {
+          tick?: number;
+          variables?: Record<string, unknown>;
+        };
+      }
+    ).__THREEJS_STUDIO_AUTHORED_BEHAVIOR_STATUS__;
+    return (
+      status?.variables?.workerMarker === 'started-in-worker'
+      && (status.tick ?? 0) > 0
+      && Number(status.variables?.workerTicks ?? 0) > 0
+    );
+  })).toBe(true);
+  const behaviorState = await frame!.evaluate(() => (
+    globalThis as typeof globalThis & {
+      __THREEJS_STUDIO_AUTHORED_BEHAVIOR_STATUS__?: {
+        tick?: number;
+        variables?: Record<string, unknown>;
+      };
+    }
+  ).__THREEJS_STUDIO_AUTHORED_BEHAVIOR_STATUS__);
+  expect(behaviorState?.tick).toBeGreaterThan(0);
+  expect(Number(behaviorState?.variables?.workerTicks)).toBeGreaterThan(0);
+  expect(behaviorState?.variables?.timeFrozen).toBe(true);
+  expect(behaviorState?.variables?.timeMutationBlocked).toBe(true);
+  expect(await page.evaluate(() => Boolean(
+    (globalThis as typeof globalThis & { __AUTHORED_BEHAVIOR_WORKER_ONLY__?: unknown })
+      .__AUTHORED_BEHAVIOR_WORKER_ONLY__,
+  ))).toBe(false);
+  await expect.poll(() => page.evaluate(() => {
+    const host = (
+      window as unknown as Window & {
+        __authoredBehaviorPreviewHost: { getDiagnostics(): { tick: number } | null };
+      }
+    ).__authoredBehaviorPreviewHost;
+    return host.getDiagnostics()?.tick ?? 0;
+  })).toBeGreaterThan(0);
+  await expect(page.locator('[data-threejs-studio-runtime-preview]')).toBeHidden();
+
+  await page.evaluate(async () => {
+    const host = (
+      window as unknown as Window & {
+        __authoredBehaviorPreviewHost: { dispose(): Promise<void> };
+      }
+    ).__authoredBehaviorPreviewHost;
     await host.dispose();
   });
   await expect(page.locator('[data-threejs-studio-runtime-preview]')).toHaveCount(0);

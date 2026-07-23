@@ -32,7 +32,7 @@ Schema v5 is now the durable project format. The existing Hierarchy, Inspector, 
 
 The checkpoint also includes the shadcn/Base UI foundation, a mounted Game Authoring workspace, validated script-source authoring, typed v5 game tools, an additive secure preview host, generalized game systems, a deterministic offline ZIP command, and a complete authored Collect & Escape template.
 
-Collect & Escape now runs through a versioned manifest adapter in editor Play and through an equivalent specialized adapter in the offline ZIP. Both cover movement, Rapier collision/sensors, pickups, score/countdown, exit win/fail/restart, HUD/touch controls, and cleanup. It is still a partial vertical slice: the authored TypeScript bundle is packaged but not executed, Play and export use separate implementations, and current Play is not hosted in the opaque iframe.
+Collect & Escape now runs through a versioned manifest adapter in editor Play and through an equivalent specialized adapter in the offline ZIP. Both cover movement, Rapier collision/sensors, pickups, score/countdown, exit win/fail/restart, HUD/touch controls, and cleanup. The authored TypeScript bundle is compiled, revision/hash-bound, and executed through the same opaque behavior iframe/Worker lifecycle in both paths. It is still a partial vertical slice: SDK commands are telemetry rather than applied gameplay mutations, Play and export use separate visible implementations, and rendering/physics are not hosted in the opaque iframe.
 
 ## Next milestone — script-driven runtime convergence
 
@@ -43,15 +43,15 @@ The next release proof is not another isolated engine feature. It is one authore
 Completed on 2026-07-20:
 
 1. Compatibility scene commits merge projected `axis2d` controls while preserving non-projectable `button`/`axis1d` actions, dead zones, and pointer/touch/gamepad bindings. Human Inspector and typed-agent browser journeys prove exact preservation and one-step Undo.
-2. One `@threejs-studio/sdk` contract now supplies runtime-facing types, Monaco's declaration, esbuild's allowlisted module, and bundled behavior templates. The exact default and Collect & Escape sources have zero TypeScript semantic diagnostics and compile unchanged; executing those bundles remains part of runtime convergence.
+2. One `@threejs-studio/sdk` contract now supplies runtime-facing types, Monaco's declaration, esbuild's allowlisted module, and bundled behavior templates. The exact default and Collect & Escape sources have zero TypeScript semantic diagnostics, compile unchanged, and execute through the opaque lifecycle host; applying their SDK commands to visible gameplay remains part of runtime convergence.
 3. The repository now has a release workflow for typecheck, production build, browserless contracts, desktop Chromium, focused mobile WebKit, axe, reviewed macOS visuals, and a built production-preview smoke. The corresponding local gate passes without replacing visual baselines.
 
 ### Delivery sequence
 
 1. Replace direct durable mutations and the v4 compatibility executor with one v5-native, revision-checked command registry for both human and agent authoring. Coordinate project, source, and binary revisions atomically.
 2. Compile registry-backed input, physics, behavior, state/event, runtime-UI, permissions, assets, and build settings into a deterministic runtime snapshot.
-3. Execute content-hashed behavior bundles only in `RuntimePreviewHost`, with exposed Inspector properties, source-linked diagnostics, stale-build cancellation, last-known-good reload, watchdog termination, and complete disposal.
-4. Make the secure host the sole Play/Preview path, then package its exact runtime modules, snapshot, behaviors, generic runtime UI, model bytes, Rapier, and decoders into the offline build.
+3. Extend the integrated content-hashed `RuntimePreviewHost` lifecycle with applied command batches, exposed Inspector properties, source-linked diagnostics, last-known-good reload, watchdog termination, and complete disposal.
+4. Make the secure host the sole visible Play/Preview path, then package its exact runtime modules, snapshot, generic runtime UI, model bytes, Rapier, and decoders into the offline build.
 5. Prove deterministic Play/export checkpoints for transforms, collisions, events, score, timer, UI, win/fail, restart, Pause/Step/Stop, reopen, keyboard, touch, and gamepad. Serve the real ZIP from a nested path with networking disabled.
 6. Mount the persisted shadcn workspace shell and migrate Hierarchy/Inspector first, including complete tree keyboard semantics, before finishing Input, Physics, State/Event, Runtime UI, Permissions, and Build settings with typed AI parity.
 
@@ -93,7 +93,7 @@ Multi-scene authoring, full prefab workflows, animation, audio, VFX, visual grap
 - Visible Assistant proposal/apply flow for approval-required v5 bridge mutations, with stale-revision rejection and normal one-step Undo.
 - `RuntimeSession` schedules Play at fixed 60 Hz with a five-tick cap and exact Step.
 - `ProjectGameRuntime` detects/validates `runtime-bindings.v1`, then orchestrates generalized input, Rapier, gameplay events/state, transforms/visibility, diagnostics, and the generic runtime-UI HUD in editor Play without mutating v5.
-- Primary Build emits a deterministic, hashed, network-independent ZIP with local Three.js and Rapier modules, a source-stripped v5 runtime projection, inert compiled-script artifacts, available model bytes, and a local HUD stylesheet. Production bootstrap does not execute authored modules and the CSP denies all connections.
+- Primary Build emits a deterministic, hashed, network-independent ZIP with local Three.js and Rapier modules, a source-stripped v5 runtime projection, exact compiled-script artifacts, a packaged opaque behavior document, available model bytes, and a local HUD stylesheet. Production bootstrap starts the hash-checked behavior Worker before the main runtime, while the CSP denies all connections.
 - The offline v1 adapter runs the Collect rules with Rapier character collision, keyboard/gamepad input, touch controls, score/countdown, win/fail/restart, diagnostics, and cleanup.
 
 ### Foundations
@@ -108,7 +108,7 @@ Multi-scene authoring, full prefab workflows, animation, audio, VFX, visual grap
 - Replace compatibility commands with a v5-native command registry used by every human and agent mutation.
 - Add transactional coordination between project, source, and binary revisions.
 - Generalize the v1 binding contract into a registry-compiled runtime snapshot.
-- Execute authored TypeScript/graph bundles rather than built-in equivalent rules.
+- Apply authored TypeScript/graph SDK commands to visible runtime systems rather than built-in equivalent rules; lifecycle execution itself is integrated.
 - Move Play/Preview from same-page `ViewportEngine` ownership into `RuntimePreviewHost`.
 - Make Play and export instantiate identical scene/assets/systems/runtime UI, load packaged models, and prove complete teardown.
 
@@ -136,7 +136,7 @@ Exit gate: a migrated legacy project and a v5 project reach the same determinist
 
 ### Remaining production integration
 
-- Execute the authored TypeScript behavior through the Studio SDK and opaque sandbox; current adapters implement equivalent built-in rules and read exposed binding properties.
+- Apply the authored TypeScript behavior's Studio SDK commands to the visible game; the opaque lifecycle now runs, while current adapters still implement equivalent built-in rules and read exposed binding properties.
 - Replace the editor's axis-aligned movement/collision adapter with a general registry-backed character-controller component and debug display.
 - Use the same runtime, state implementation, and generic runtime-UI renderer in Play and export.
 - Add general authoring operations/forms/tools for input, physics, state/events, runtime UI, and permissions.
@@ -209,12 +209,12 @@ Exit gate: an experienced developer can build and debug routine game features wi
 | Shadcn/Base UI | Preset, tokens/providers, generated components, migrated menus/dialog/workspace surfaces, focused a11y tests | Default shell and every editor surface migrated; complete keyboard/focus/axe/mobile coverage |
 | Schema v5 | Authoritative load/save/history/package format plus legacy adapter | All authoring panels and runtime consumers operate v5-natively; adapter retired |
 | Commands/AI | Atomic v4 compatibility executor; v5 script/template/build tools with inverse snapshots | Every v5 human mutation uses the common command registry and produces the same result through a tool and one-step Undo |
-| Runtime | Shared scheduler plus v1 game-system adapter in same-page Play; secure host tested separately | `RuntimePreviewHost` is the sole Play/Preview path and the same compiled runtime runs in export |
-| Scripts | Monaco source authoring, compiler/sandbox foundations, build packaging | Component attachment, sandbox execution, hot reload, diagnostics/debugging, and security acceptance |
+| Runtime | Shared scheduler plus v1 game-system adapter in same-page Play; a hidden secure host mirrors the authored lifecycle | `RuntimePreviewHost` owns visible Play/Preview and the same compiled runtime runs in export |
+| Scripts | Monaco source authoring, compiler, hash-bound opaque lifecycle execution in Play/export, bounded diagnostics | Component attachment, SDK command application, hot reload, debugging, and full security acceptance |
 | Input/physics/state | V1 Collect adapter consumes the production modules in editor Play; offline has an equivalent Rapier adapter | General registry components/settings/tools and one shared implementation |
 | Runtime UI | Hardened generic renderer mounts the editor HUD; offline mounts a separate accessible HUD | Visual authoring and the same responsive HUD/touch implementation in Play/export |
-| Offline build | Deterministic ZIP runs the specialized Collect rules with local Three/Rapier and no CDN | Exact Play runtime, model/decoder and compiled behavior execution, plus network-disabled journey |
-| Collect & Escape | Authored v5 template and runnable editor/offline manifest adapters | Script-driven opaque Play, same-runtime export, full desktop/mobile control parity and reopen journey |
+| Offline build | Deterministic ZIP executes the compiled lifecycle, then runs specialized Collect rules with local Three/Rapier and no CDN | Exact visible Play runtime, model/decoder support, SDK command application, and network-disabled journey |
+| Collect & Escape | Authored v5 template, isolated compiled lifecycle, and runnable editor/offline manifest adapters | Behavior-driven opaque Play, same-runtime export, full desktop/mobile control parity and reopen journey |
 
 ## Testing and release gates
 

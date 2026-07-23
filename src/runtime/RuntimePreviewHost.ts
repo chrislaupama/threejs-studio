@@ -96,6 +96,7 @@ export interface RuntimePreviewHostOptions {
    */
   readonly runtimeSource?: string;
   readonly title?: string;
+  readonly hidden?: boolean;
   readonly readyTimeoutMs?: number;
   readonly commandTimeoutMs?: number;
   readonly diagnosticsThrottleMs?: number;
@@ -181,7 +182,7 @@ function createHandshakeId(view: Window): string {
   return `preview-${[...bytes].map((entry) => entry.toString(16).padStart(8, '0')).join('')}`;
 }
 
-function createRuntimePreviewDocument(runtimeSource = ''): string {
+export function createRuntimePreviewDocument(runtimeSource = ''): string {
   const bridgeSource = `
 (() => {
   'use strict';
@@ -196,6 +197,7 @@ function createRuntimePreviewDocument(runtimeSource = ''): string {
   let port = null;
   let identity = null;
   let adapter = null;
+  let unsubscribeDiagnostics = null;
   let inboundSequence = 1;
   let outboundSequence = 1;
   let diagnostics = null;
@@ -333,7 +335,11 @@ function createRuntimePreviewDocument(runtimeSource = ''): string {
         diagnostics: nextDiagnostics,
       }));
       post(runtimeMessage('runtime.diagnostics', { diagnostics: nextDiagnostics }));
-      if (message.action === 'dispose') queueMicrotask(() => port && port.close());
+      if (message.action === 'dispose') {
+        if (typeof unsubscribeDiagnostics === 'function') unsubscribeDiagnostics();
+        unsubscribeDiagnostics = null;
+        queueMicrotask(() => port && port.close());
+      }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Runtime command failed.';
       post(runtimeMessage('runtime.error', {
@@ -373,6 +379,14 @@ function createRuntimePreviewDocument(runtimeSource = ''): string {
     try {
       const factory = globalThis.__THREEJS_STUDIO_PREVIEW_RUNTIME_FACTORY__;
       if (typeof factory === 'function') adapter = await factory(Object.freeze({ ...identity }));
+      if (adapter && typeof adapter.subscribeDiagnostics === 'function') {
+        const unsubscribe = adapter.subscribeDiagnostics((nextDiagnostics) => {
+          if (!plainObject(nextDiagnostics)) return;
+          diagnostics = nextDiagnostics;
+          post(runtimeMessage('runtime.diagnostics', { diagnostics: nextDiagnostics }));
+        });
+        if (typeof unsubscribe === 'function') unsubscribeDiagnostics = unsubscribe;
+      }
       if (adapter && typeof adapter.getDiagnostics === 'function') {
         const initialDiagnostics = adapter.getDiagnostics();
         if (plainObject(initialDiagnostics)) diagnostics = initialDiagnostics;
@@ -485,6 +499,7 @@ export class RuntimePreviewHost {
   private readonly container: HTMLElement;
   private readonly runtimeSource: string;
   private readonly title: string;
+  private readonly hidden: boolean;
   private readonly readyTimeoutMs: number;
   private readonly commandTimeoutMs: number;
   private readonly diagnosticsThrottleMs: number;
@@ -529,6 +544,7 @@ export class RuntimePreviewHost {
     this.container = container;
     this.runtimeSource = options.runtimeSource ?? '';
     this.title = options.title?.trim() || 'Game preview';
+    this.hidden = options.hidden ?? false;
     this.readyTimeoutMs = validateTimeout(options.readyTimeoutMs, DEFAULT_READY_TIMEOUT_MS, 'readyTimeoutMs');
     this.commandTimeoutMs = validateTimeout(options.commandTimeoutMs, DEFAULT_COMMAND_TIMEOUT_MS, 'commandTimeoutMs');
     this.diagnosticsThrottleMs = validateTimeout(
@@ -575,6 +591,7 @@ export class RuntimePreviewHost {
     const iframe = this.container.ownerDocument.createElement('iframe');
     iframe.title = this.title;
     iframe.name = this.handshakeId;
+    iframe.hidden = this.hidden;
     iframe.setAttribute('sandbox', RUNTIME_PREVIEW_SANDBOX);
     iframe.setAttribute('allow', RUNTIME_PREVIEW_ALLOW);
     iframe.setAttribute('csp', RUNTIME_PREVIEW_CSP);

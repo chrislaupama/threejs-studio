@@ -16,6 +16,10 @@ export interface BuildBundleInput {
   /** Relative module path that exports a named `boot` function or a default boot function. */
   entry: string;
   files: readonly BuildFileInput[];
+  /** Exact SHA-256 of an authored entry module, when this bundle carries behavior code. */
+  contentHash?: string;
+  /** Authoring revision used to compile an authored entry module. */
+  projectRevision?: number;
 }
 
 export interface LegacySingleHtmlProfileMetadata {
@@ -162,7 +166,7 @@ export interface BuildManifest {
   contentSecurityPolicy: string;
   security: {
     networkPolicy: 'deny';
-    authoredScriptExecution: 'disabled-pending-opaque-sandbox';
+    authoredScriptExecution: 'disabled-pending-opaque-sandbox' | 'opaque-sandbox';
     projectAuthoringSource: 'omitted' | 'included';
   };
   hashAlgorithm: 'SHA-256';

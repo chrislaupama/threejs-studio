@@ -48,6 +48,7 @@ interface ThreeJSStudioDiagnostics {
       diagnostics: unknown;
       hud: unknown;
     };
+    authoredBehavior?: import('./runtime/types').RuntimeDiagnostics;
   };
 }
 

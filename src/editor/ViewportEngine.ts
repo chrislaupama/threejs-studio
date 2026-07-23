@@ -19,6 +19,13 @@ import type {
   ViewMode,
 } from './types';
 import { RuntimeSession } from '../runtime/RuntimeSession';
+import { RuntimePreviewHost } from '../runtime/RuntimePreviewHost';
+import {
+  createAuthoredBehaviorPreviewSource,
+  createBehaviorPreviewSnapshot,
+  type CompiledBehaviorPreview,
+} from '../runtime/behaviorPreviewRuntime';
+import type { RuntimeDiagnostics } from '../runtime/types';
 import {
   createProjectGameRuntime,
   detectProjectRuntimeBindings,
@@ -35,6 +42,7 @@ interface ViewportCallbacks {
   onStats: (stats: RendererStats) => void;
   resolveAssetSource: (projectId: string, assetId: string, revision: number) => Promise<StoredModelSource | null>;
   onAssetState: (nodeId: string, assetId: string, state: AssetLoadState, message?: string) => void;
+  onRuntimeError?: (message: string) => void;
 }
 
 interface CachedModel {
@@ -135,6 +143,9 @@ export class ViewportEngine {
   private gameRuntimeHUD: ProjectGameRuntimeHUDSnapshot | null = null;
   private gameRuntimeInputCodes = new Set<string>();
   private gameRuntimePreparation = 0;
+  private behaviorPreviewHost: RuntimePreviewHost | null = null;
+  private behaviorPreviewDiagnostics: RuntimeDiagnostics | null = null;
+  private behaviorPreviewCommands: Promise<void> = Promise.resolve();
   private readonly pressedCodes = new Set<string>();
   private boundInputCodes = new Set<string>();
   private frames = 0;
@@ -745,11 +756,43 @@ export class ViewportEngine {
    * initialization is asynchronous, while RuntimeSession lifecycle hooks stay
    * deterministic and synchronous once Play begins.
    */
-  async prepareGameRuntime(project: ProjectDocumentV5): Promise<boolean> {
+  async prepareGameRuntime(
+    project: ProjectDocumentV5,
+    compiledBehavior?: CompiledBehaviorPreview,
+  ): Promise<boolean> {
     if (this.disposed) throw new Error('The viewport has been disposed.');
     if (this.mode !== 'edit') throw new Error('Game runtime preparation requires Edit mode.');
     const preparation = ++this.gameRuntimePreparation;
     this.disposeGameRuntime();
+    if (compiledBehavior) {
+      const container = this.canvas.parentElement;
+      if (!container) throw new Error('The viewport cannot mount the authored behavior sandbox.');
+      const behaviorHost = new RuntimePreviewHost({
+        container,
+        identity: {
+          sessionId: `editor-behavior-${Date.now()}-${preparation}`,
+          revision: compiledBehavior.projectRevision,
+          buildHash: compiledBehavior.contentHash,
+        },
+        runtimeSource: createAuthoredBehaviorPreviewSource(
+          compiledBehavior,
+          createBehaviorPreviewSnapshot(project),
+        ),
+        title: 'Authored behavior runtime',
+        hidden: true,
+        onDiagnostics: (diagnostics) => {
+          this.behaviorPreviewDiagnostics = diagnostics;
+        },
+        onRuntimeError: (error) => this.callbacks.onRuntimeError?.(error.message),
+      });
+      this.behaviorPreviewHost = behaviorHost;
+      await behaviorHost.mount();
+      if (preparation !== this.gameRuntimePreparation || this.disposed || this.mode !== 'edit') {
+        await behaviorHost.dispose();
+        if (this.behaviorPreviewHost === behaviorHost) this.behaviorPreviewHost = null;
+        return false;
+      }
+    }
     const detected = detectProjectRuntimeBindings(project);
     if (!detected) return false;
 
@@ -795,9 +838,13 @@ export class ViewportEngine {
     });
     if (preparation !== this.gameRuntimePreparation || this.disposed || this.mode !== 'edit') {
       runtime?.dispose();
+      this.disposeBehaviorPreview();
       return false;
     }
-    if (!runtime) return false;
+    if (!runtime) {
+      this.disposeBehaviorPreview();
+      return false;
+    }
     this.gameRuntime = runtime;
     this.gameRuntimeInputCodes = inputCodes;
     this.gameRuntimeSnapshot = runtime.getSnapshot();
@@ -817,6 +864,31 @@ export class ViewportEngine {
     this.gameRuntimeDiagnostics = null;
     this.gameRuntimeHUD = null;
     this.gameRuntimeInputCodes.clear();
+    this.disposeBehaviorPreview();
+  }
+
+  private disposeBehaviorPreview() {
+    const host = this.behaviorPreviewHost;
+    this.behaviorPreviewHost = null;
+    this.behaviorPreviewDiagnostics = null;
+    this.behaviorPreviewCommands = Promise.resolve();
+    if (host) void host.dispose();
+  }
+
+  private controlBehaviorPreview(action: 'start' | 'pause' | 'resume' | 'step' | 'restart') {
+    const host = this.behaviorPreviewHost;
+    if (!host) return;
+    this.behaviorPreviewCommands = this.behaviorPreviewCommands
+      .then(async () => {
+        const diagnostics = await host[action]();
+        if (this.behaviorPreviewHost === host) this.behaviorPreviewDiagnostics = diagnostics;
+      })
+      .catch((error: unknown) => {
+        if (this.behaviorPreviewHost !== host) return;
+        this.callbacks.onRuntimeError?.(
+          error instanceof Error ? error.message : 'The authored behavior runtime failed.',
+        );
+      });
   }
 
   setMode(mode: EditorMode) {
@@ -849,6 +921,7 @@ export class ViewportEngine {
             this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
           },
           fixedUpdate: (context) => {
+            const previousRestartCount = this.gameRuntimeSnapshot?.restartCount ?? 0;
             this.runtimeTime = context.simulationTimeSeconds;
             this.runtimeTick = context.tick;
             if (context.source === 'manual-step' && preparedGameRuntime.status === 'paused') {
@@ -859,6 +932,9 @@ export class ViewportEngine {
               this.gameRuntimeSnapshot = preparedGameRuntime.fixedUpdate(context.fixedDeltaSeconds);
             }
             this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+            if ((this.gameRuntimeSnapshot?.restartCount ?? 0) > previousRestartCount) {
+              this.controlBehaviorPreview('restart');
+            }
           },
           pause: () => {
             this.gameRuntimeSnapshot = preparedGameRuntime.pause();
@@ -871,6 +947,7 @@ export class ViewportEngine {
           restart: () => {
             this.gameRuntimeSnapshot = preparedGameRuntime.restart();
             this.gameRuntimeDiagnostics = preparedGameRuntime.getDiagnostics();
+            this.controlBehaviorPreview('restart');
           },
           dispose: () => preparedGameRuntime.dispose(),
         }] : [{
@@ -884,10 +961,13 @@ export class ViewportEngine {
         }],
       });
       this.runtimeSession.start();
+      this.controlBehaviorPreview('start');
     } else if (mode === 'paused' && previousMode === 'play') {
       this.runtimeSession?.pause();
+      this.controlBehaviorPreview('pause');
     } else if (mode === 'play' && previousMode === 'paused') {
       this.runtimeSession?.resume();
+      this.controlBehaviorPreview('resume');
     }
     if (mode !== 'play') this.onWindowBlur();
     this.updateEditorVisibility();
@@ -916,6 +996,7 @@ export class ViewportEngine {
     const diagnostics = this.runtimeSession.step();
     this.runtimeTime = diagnostics.simulationTimeSeconds;
     this.runtimeTick = diagnostics.tick;
+    this.controlBehaviorPreview('step');
   }
 
   frameSelection() {
@@ -1088,6 +1169,9 @@ export class ViewportEngine {
               diagnostics: structuredClone(this.gameRuntimeDiagnostics),
               hud: structuredClone(this.gameRuntimeHUD),
             },
+          } : {}),
+          ...(this.behaviorPreviewDiagnostics ? {
+            authoredBehavior: structuredClone(this.behaviorPreviewDiagnostics),
           } : {}),
         },
       };

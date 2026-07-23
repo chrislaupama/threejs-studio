@@ -871,7 +871,22 @@ export default function App() {
       const engine = engineRef.current;
       if (!engine) throw new Error('The viewport runtime is unavailable.');
       const requiresGameRuntime = detectProjectRuntimeBindings(gameProject) !== null;
-      const prepared = await engine.prepareGameRuntime(gameProject);
+      const hasAuthoredBehavior = gameProject.assets.some((asset) => asset.kind === 'script');
+      let compiledBehavior;
+      if (hasAuthoredBehavior) {
+        const { compileProjectScriptsForBuild } = await import('./build/scriptBuild');
+        const compiled = await compileProjectScriptsForBuild(gameProject, revision, 'development');
+        if (!compiled.moduleCode || !compiled.contentHash) {
+          throw new Error(compiled.diagnostics[0] ?? 'The authored behavior did not produce an executable module.');
+        }
+        compiledBehavior = {
+          moduleCode: compiled.moduleCode,
+          contentHash: compiled.contentHash,
+          projectRevision: revision,
+        };
+      }
+      if (request !== playRequestRef.current || revision !== projectRevisionRef.current) return false;
+      const prepared = await engine.prepareGameRuntime(gameProject, compiledBehavior);
       if (request !== playRequestRef.current || modeRef.current !== 'edit' || revision !== projectRevisionRef.current) {
         // The synchronous in-flight owner prevents a newer Play preparation
         // from starting until this call settles, so this cleanup can only
@@ -1209,6 +1224,7 @@ export default function App() {
       onAssetState: (_nodeId, assetId, state, message) => {
         setAssetStatuses((statuses) => ({ ...statuses, [assetId]: { state, message } }));
       },
+      onRuntimeError: (message) => addLog(`Authored behavior failed · ${message}`, 'warning'),
     });
     engineRef.current = engine;
     return () => {

@@ -37,7 +37,11 @@ const scriptFiles: BuildFileInput[] = [
   { path: 'behaviors/player.js', contents: 'export const speed = 4;\n' },
   {
     path: 'game.js',
-    contents: `export { speed } from './behaviors/player.js';\n`,
+    contents: `export default {
+  name: 'Offline behavior',
+  schema: { speed: { type: 'number', default: 4 } },
+  onStart(ctx) { ctx.api.variables.set('offlineBehaviorStarted', true); }
+};\n`,
   },
 ];
 
@@ -83,6 +87,7 @@ test('offline ZIP builds are deterministic, sorted, hashed, CSP-restricted, and 
   expect(Object.keys(archive).sort()).toEqual([
     'assets/models/ship.glb',
     'assets/textures/ui.png',
+    'authored-behavior.html',
     'bootstrap.js',
     'index.html',
     'manifest.json',
@@ -160,7 +165,7 @@ test('offline ZIP builds are deterministic, sorted, hashed, CSP-restricted, and 
   }
 });
 
-test('production keeps compiled behaviors inert and excludes raw TypeScript and source maps', async () => {
+test('production executes compiled behaviors only in the opaque sandbox and excludes authoring sources', async () => {
   const rawSourceMarker = 'RAW_TYPESCRIPT_AUTHORING_SOURCE_DO_NOT_SHIP';
   const topLevelExecutionMarker = '__AUTHORED_TOP_LEVEL_CODE_RAN__';
   const project = {
@@ -190,7 +195,12 @@ test('production keeps compiled behaviors inert and excludes raw TypeScript and 
     scripts: {
       entry: 'game.js',
       files: [
-        { path: 'game.js', contents: `globalThis.${topLevelExecutionMarker} = true;\nexport const ready = true;\n` },
+        {
+          path: 'game.js',
+          contents: `globalThis.${topLevelExecutionMarker} = true;
+export default { schema: {}, onStart() {} };
+`,
+        },
         {
           path: 'game.js.map',
           contents: JSON.stringify({ version: 3, sourcesContent: [`const ${rawSourceMarker} = true;`] }),
@@ -220,7 +230,7 @@ test('production keeps compiled behaviors inert and excludes raw TypeScript and 
   });
   expect(built.manifest.security).toEqual({
     networkPolicy: 'deny',
-    authoredScriptExecution: 'disabled-pending-opaque-sandbox',
+    authoredScriptExecution: 'opaque-sandbox',
     projectAuthoringSource: 'omitted',
   });
   expect(built.manifest.contentSecurityPolicy).toContain("connect-src 'none'");
@@ -230,12 +240,17 @@ test('production keeps compiled behaviors inert and excludes raw TypeScript and 
   for (const path of executablePaths) {
     const executable = strFromU8(archive[path]);
     expect(executable, `${path} must not embed raw TypeScript`).not.toContain(rawSourceMarker);
-    expect(executable, `${path} must not contain authored top-level code`).not.toContain(topLevelExecutionMarker);
     expect(executable, `${path} must not reference the inert behavior artifact`).not.toContain(scriptArtifactPath);
+    if (path === 'runtime/main.js') {
+      expect(executable, `${path} must not contain authored top-level code`).not.toContain(topLevelExecutionMarker);
+    }
   }
+  expect(strFromU8(archive['authored-behavior.html'])).toContain(topLevelExecutionMarker);
+  expect(strFromU8(archive['authored-behavior.html'])).toContain('new Worker');
+  expect(strFromU8(archive['bootstrap.js'])).toContain('data-threejs-studio-runtime-preview');
 });
 
-test('production bootstrap starts without requesting or executing the authored artifact', async ({ page }, testInfo) => {
+test('production bootstrap executes the authored behavior in an opaque worker without requesting its artifact', async ({ page }, testInfo) => {
   test.skip(!testInfo.project.name.includes('desktop'), 'The production bootstrap security journey runs once.');
   const executionMarker = '__OFFLINE_AUTHORED_MODULE_EXECUTED__';
   const built = await buildOfflineZip(request({
@@ -248,7 +263,15 @@ test('production bootstrap starts without requesting or executing the authored a
     },
     scripts: {
       entry: 'game.js',
-      files: [{ path: 'game.js', contents: `globalThis.${executionMarker} = true;\nexport default {};\n` }],
+      files: [{
+        path: 'game.js',
+        contents: `globalThis.${executionMarker} = true;
+export default {
+  schema: {},
+  onStart(ctx) { ctx.api.variables.set('offlineBehaviorStarted', true); }
+};
+`,
+      }],
     },
   }));
   const archive = unzipSync(built.archive);
@@ -283,6 +306,18 @@ test('production bootstrap starts without requesting or executing the authored a
 
   expect(securityState.authoredTopLevelRan).toBe(false);
   expect(securityState.project).toMatchObject({ schemaVersion: 4, id: 'offline-test' });
+  const behaviorFrame = page.frame({ name: 'offline-authored-behavior' });
+  expect(behaviorFrame).not.toBeNull();
+  await expect.poll(() => behaviorFrame!.evaluate(() => {
+    const status = (
+      globalThis as typeof globalThis & {
+        __THREEJS_STUDIO_AUTHORED_BEHAVIOR_STATUS__?: {
+          variables?: Record<string, unknown>;
+        };
+      }
+    ).__THREEJS_STUDIO_AUTHORED_BEHAVIOR_STATUS__;
+    return status?.variables?.offlineBehaviorStarted;
+  })).toBe(true);
   expect(requestedPaths).toContain('runtime/main.js');
   expect(requestedPaths).not.toContain('scripts/game.js.module-artifact');
 });
@@ -382,6 +417,29 @@ test('project build snapshots keep one project revision and reject stale async w
       currentRevision: 13,
     });
   }
+});
+
+test('offline behavior execution rejects compiled bytes with a stale content identity', async () => {
+  const moduleCode = 'export default { schema: {}, onStart() {} };\n';
+  await expect(buildOfflineZip(request({
+    scripts: {
+      entry: 'game.js',
+      files: [{ path: 'game.js', contents: moduleCode }],
+      contentHash: '0'.repeat(64),
+      projectRevision: 41,
+    },
+  }))).rejects.toThrow('Authored behavior bytes do not match their compiled contentHash');
+
+  const contentHash = await sha256Hex(new TextEncoder().encode(moduleCode));
+  const built = await buildOfflineZip(request({
+    scripts: {
+      entry: 'game.js',
+      files: [{ path: 'game.js', contents: moduleCode }],
+      contentHash,
+      projectRevision: 41,
+    },
+  }));
+  expect(built.manifest.security.authoredScriptExecution).toBe('opaque-sandbox');
 });
 
 test('AbortSignal cancels before work and from a progress hook without returning a partial artifact', async () => {

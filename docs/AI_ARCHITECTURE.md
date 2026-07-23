@@ -110,20 +110,20 @@ Status terms:
 | Multiple scenes and layers | Startup scene through legacy view | No v5 mutation tool | Foundation; schema/validation/preservation exist, editing and runtime transitions do not. |
 | Prefabs/overrides/variants | No | No | Schema foundation only. |
 | General asset union | Scripts integrated; models compatible | Script tools only | Partial; transactional importers/source revisions are still required. |
-| Script source | Monaco create/edit/save | List/read/upsert/delete | Integrated source-authoring slice with code approval and Undo. Monaco, esbuild, bundled templates, and runtime-facing SDK types share `@threejs-studio/sdk`; runtime execution/hot reload is not integrated. |
+| Script source | Monaco create/edit/save; compiled lifecycle runs in opaque Play/export Workers | List/read/upsert/delete | Integrated source-authoring and initial execution slice with code approval and Undo. Monaco, esbuild, templates, and runtime-facing SDK types share `@threejs-studio/sdk`; SDK commands are telemetry only, and hot reload/debugging are not integrated. |
 | Variables/events/game state | Template data runs through the v1 adapter | No | Partial runtime slice; needs general operations, panels/tools, and script/graph orchestration. |
 | Physics | Collect-style manifest runs in Play/export | No | Partial Rapier slice; needs registry components, Inspector/debug authoring, tools, and a general shared runtime. |
 | Runtime game UI | Summary plus mounted Collect HUD in Play | No | Partial; the generic renderer runs in editor Play, while export uses a specialized HUD. Visual authoring and parity remain open. |
-| Build profiles/offline ZIP | List/build default profile | List/prepare | Partial; the ZIP runs the v1 Collect rules offline, but not arbitrary scripts/models or the same runtime implementation as Play. |
+| Build profiles/offline ZIP | List/build default profile | List/prepare | Partial; the ZIP hash-checks and executes the exact compiled behavior in an opaque Worker, then runs the separate v1 Collect adapter. SDK command application, arbitrary models, and same-runtime Play/export remain open. |
 | Permissions | No editor | No mutation tool | V5 default-deny schema only; add visible settings/approval operations. |
 | Editor selection/viewport/runtime/history | Yes | Legacy browser host | Integrated locally; host actions are not a general transactional batch API. |
-| Collect & Escape replacement | Menu/command and runnable adapter | Approval-gated v5 replacement | Authoring, Undo, and the manifest-driven core loop are integrated; script-driven shared-runtime acceptance is not. |
+| Collect & Escape replacement | Menu/command and runnable adapter plus isolated authored lifecycle | Approval-gated v5 replacement | Authoring, Undo, compiled hook execution, and the manifest-driven core loop are integrated; authored commands do not yet drive the visible shared runtime. |
 
 If a human control lands before its safe agent route, the gap and required approval/transport work must be recorded here before the feature is called complete.
 
 ## Scripts and binary approvals
 
-Script source is serializable authored data, but saving or executing code is higher-risk than changing a transform. Script operations currently support list/read/upsert/delete and validate normalized virtual paths, source size, source/catalog revisions, and the complete project. Attach/detach, exposed properties, compile diagnostics, execution, and hot reload still need complete human and agent routes.
+Script source is serializable authored data, but saving or executing code is higher-risk than changing a transform. Script operations support list/read/upsert/delete and validate normalized virtual paths, source size, source/catalog revisions, and the complete project. Play/build execution recompiles the observed revision, binds execution to the SHA-256 of the exact module bytes, and runs it in a network-dark opaque iframe/Worker. Attach/detach, general exposed-property editing, persisted compile diagnostics, SDK command application, and hot reload still need complete human and agent routes.
 
 Large binaries must not travel as ordinary base64 tool arguments. A future external-agent path should be staged:
 
@@ -160,7 +160,7 @@ The release workflow runs typecheck, production build, browserless contracts, de
 
 1. Define a v5-native command registry and route both legacy scene commits and new game surfaces through it.
 2. Add typed operations/tools for generalized input, physics, state/events, runtime UI, permissions, and build settings.
-3. Replace the specialized `runtime-bindings.v1` behavior adapters with compiled behavior execution in the shared sandboxed runtime.
+3. Apply validated SDK command batches from the compiled behavior Worker to a registry-backed runtime snapshot, replacing the specialized `runtime-bindings.v1` rule implementations.
 4. Make Play and export consume the same compiled runtime snapshot and generic runtime-UI implementation.
 5. Pass Collect & Escape through both human and agent authoring paths and the complete script-driven offline journey.
 6. Add staged binary transport, a local MCP adapter, provider adapters, then hosted collaboration.

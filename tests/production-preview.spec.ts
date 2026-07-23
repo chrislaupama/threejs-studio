@@ -33,6 +33,17 @@ test('production preview boots its hashed assets and enters Play without browser
   await page.keyboard.press('Escape');
   await expect(page.getByTestId('studio-app')).toHaveClass(/mode-edit/);
 
+  await page.getByRole('menuitem', { name: 'File' }).click();
+  await page.getByRole('menuitem', { name: 'New Collect & Escape game' }).click();
+  const workspace = page.getByTestId('game-authoring-workspace');
+  await workspace.getByRole('button', { name: 'Play' }).click();
+  await expect(page.getByTestId('studio-app')).toHaveAttribute('data-runtime', 'playing', { timeout: 15_000 });
+  await expect.poll(() => page.evaluate(() => (
+    window.__THREEJS_STUDIO_DIAGNOSTICS__?.runtime.authoredBehavior?.tick ?? 0
+  ))).toBeGreaterThan(0);
+  await page.getByTestId('stop-button').click();
+  await expect(page.getByTestId('studio-app')).toHaveAttribute('data-runtime', 'edit');
+
   expect(browserErrors).toEqual([]);
   expect(failedRequests).toEqual([]);
   expect(failedResponses).toEqual([]);

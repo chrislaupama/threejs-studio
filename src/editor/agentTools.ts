@@ -818,7 +818,7 @@ const toolDefinitions: AgentToolDefinition[] = [
   {
     name: 'studio_control_runtime',
     title: 'Control game runtime',
-    description: 'Play, pause, resume, fixed-step, stop, enter clean Preview, or exit Preview through the editor runtime lifecycle.',
+    description: 'Play, pause, resume, fixed-step, stop, enter clean Preview, or exit Preview through the editor runtime lifecycle, including any compiled opaque behavior host.',
     category: 'runtime',
     readOnly: false,
     scopes: ['runtime.control'],

@@ -51,7 +51,7 @@ Four boundaries are non-negotiable:
 
 ## Current integration boundary
 
-The authoritative-project migration has landed, but runtime convergence is incomplete.
+The authoritative-project migration and first opaque behavior-lifecycle slice have landed, but visible runtime convergence is incomplete.
 
 ### Integrated path
 
@@ -59,9 +59,9 @@ The authoritative-project migration has landed, but runtime convergence is incom
 - `src/editor/gameProject.ts` derives the active scene as a schema-v4 compatibility view and merges legacy scene edits back into v5 without dropping v5-only records. The merge preserves hidden button/axis1d actions and non-keyboard axis2d bindings, and rejects hidden-ID collisions atomically.
 - `GameAuthoringWorkspace` is mounted from the activity rail and provides shadcn/Base UI Scripts, Input, Game UI, and Build tabs.
 - Monaco Save uses a pure v5 script operation, an executable-code approval dialog, full validation, normal history, autosave, and one-step Undo. Monaco and esbuild consume the same `@threejs-studio/sdk` contract and exact starter sources.
-- `ViewportEngine` prepares a disposable v5 `ProjectGameRuntime` when a project carries `threejs-studio.runtime-bindings.v1`, then drives it through `RuntimeSession`. The controller runs generalized input, Rapier, gameplay state/events, transforms/visibility, and the generic runtime-UI HUD without mutating authored data.
+- `ViewportEngine` compiles the observed script revision, mounts its hash-bound default behavior in a hidden `RuntimePreviewHost`, and prepares a disposable v5 `ProjectGameRuntime` when the project carries `threejs-studio.runtime-bindings.v1`. Lifecycle controls are mirrored into the opaque behavior Worker, while the controller still owns generalized input, Rapier, gameplay state/events, transforms/visibility, and the generic runtime-UI HUD without mutating authored data.
 - Play supports the Collect & Escape core loop through keyboard, pointer/touch HUD controls, and gamepad polling; Pause/Step/restart/Stop retain fixed-tick and cleanup semantics. Projects without a runtime-binding manifest retain Rotate, Float, and Keyboard Move compatibility.
-- The primary Build command produces a deterministic offline ZIP from the v5 snapshot, local Three.js/Rapier/runtime files, compiled project-script output, available model sources, and a local HUD stylesheet.
+- The primary Build command produces a deterministic offline ZIP from the v5 snapshot, local Three.js/Rapier/runtime files, exact hash-checked compiled project-script output, a packaged opaque behavior document, available model sources, and a local HUD stylesheet.
 - The offline v1 adapter runs the Collect & Escape core loop with Rapier, keyboard/gamepad input, touch controls, score/countdown, win/fail/restart, diagnostics, and cleanup.
 
 ### Additive foundations
@@ -73,14 +73,14 @@ The authoritative-project migration has landed, but runtime convergence is incom
 | `editor/projectCommands.ts` | Atomic revision-checked command batches for v4 scene domains | V5 command registry and universal App/human/agent adoption |
 | `editor/componentRegistry.ts` | Definitions for Rotate, Float, Keyboard Move | Physics, script, audio, animation, VFX, runtime-UI definitions and registry-driven Inspector/runtime |
 | `runtime/RuntimeSession.ts` | Fixed scheduler, ordered systems, exact Step, diagnostics, restart/disposal | One compiled project runtime shared by Play, Preview, tests, and export |
-| `runtime/RuntimePreviewHost.ts` | Tested opaque-origin iframe, lifecycle protocol, identity/sequence validation, throttled diagnostics, cleanup | Replace the current same-origin Play/Preview path |
-| `runtime/ProjectGameRuntime.ts` | Validated v1 manifest adapter for input, Rapier, state/events, HUD, Collect rules, diagnostics, and cleanup; active in editor Play | General component/system compilation, authored behavior execution, non-Collect rules, opaque host, export reuse |
+| `runtime/RuntimePreviewHost.ts` | Opaque-origin behavior execution in editor Play/export, lifecycle protocol, identity/sequence validation, bounded diagnostics, cleanup | Own visible rendering/physics/UI and replace the remaining same-origin Play path |
+| `runtime/ProjectGameRuntime.ts` | Validated v1 manifest adapter for input, Rapier, state/events, HUD, Collect rules, diagnostics, and cleanup; active alongside the behavior Worker in editor Play | General component/system compilation, SDK command application, non-Collect rules, opaque host, export reuse |
 | `gameplay/input.ts` | Device-neutral button/axis resolver used by editor Play's v1 adapter | V5 settings operations/forms/tools and fully general browser mappings |
 | `gameplay/physics.ts` | Rapier world/body/collider/sensor wrapper used by editor Play's v1 adapter | Registry entity components, full character controller, Inspector/debug UI, general runtime compilation |
 | `gameplay/events.ts` / `state.ts` | Typed events, variables, queues, objectives/score/timers used by editor Play's v1 adapter | V5 operations, panels/tools, save schema, authored script/graph orchestration |
 | `runtime-ui/` | Hardened accessible DOM/CSS renderer mounted for the editor's Collect HUD | Visual authoring, generalized binding adapters, and offline-runtime reuse |
-| `scripting/` | Canonical `@threejs-studio/sdk` types/declaration/compiler shim/templates, virtual file system, esbuild-wasm compiler Worker/client, sandbox document/protocol | Script component instances, execution/hot reload/debugging in the shared runtime |
-| `build/` | Deterministic ZIP, script packaging, local Three.js/Rapier modules, specialized offline Collect adapter/HUD | Model decoding, compiled behavior execution, generic runtime UI, exact Play/export parity |
+| `scripting/` | Canonical `@threejs-studio/sdk` types/declaration/compiler shim/templates, virtual file system, esbuild-wasm compiler, and hash-bound opaque behavior lifecycle | Script component instances, SDK command application, hot reload/debugging in the shared runtime |
+| `build/` | Deterministic ZIP, opaque compiled-behavior execution, local Three.js/Rapier modules, specialized offline Collect adapter/HUD | Model decoding, generic runtime UI, applied behavior commands, exact Play/export parity |
 | `components/studio/workspace/` | Serializable split-tree/panel registry, desktop/mobile shell components, preference sync tests | Replace the current hand-built workbench as the default shell |
 
 ## Authoritative ProjectDocumentV5
@@ -130,7 +130,7 @@ Rotate, Float, and Keyboard Move are registered. Physics, behavior, animation, a
 
 The current `ViewportEngine` asynchronously prepares `ProjectGameRuntime` from a cloned v5 project before entering Play. The v1 adapter validates manifest references, creates `InputRuntime`, a Rapier `PhysicsWorld`, and `GameplayStateStore`, mounts the framework-free HUD, and sends runtime-only transform/active updates to the existing Three.js object map. It handles deterministic movement, pickups, a locked/unlocked exit, score/countdown, win/fail/restart, keyboard/pointer/touch/gamepad input, serializable HUD/diagnostics, and cleanup. Stop rebuilds authored transforms from the document.
 
-This is meaningful gameplay-system convergence, but not runtime-host or arbitrary-program convergence. `ViewportEngine` still owns rendering and browser listeners in the editor origin. The controller implements a specialized v1 Collect-style tag/rule contract with an axis-aligned character-collision adapter; it does not execute the authored TypeScript behavior.
+This is meaningful gameplay-system convergence, but not complete runtime-host or arbitrary-program convergence. `ViewportEngine` still owns rendering and browser listeners in the editor origin. The authored TypeScript lifecycle executes in a sibling opaque Worker, but its serializable SDK commands are retained as bounded diagnostics; the controller still implements the visible specialized v1 Collect-style tag/rule contract with an axis-aligned character-collision adapter.
 
 The required system order remains:
 
@@ -162,9 +162,9 @@ The next compiler/orchestrator must replace that specialized adapter with a gene
 
 It omits `allow-same-origin`, applies a network-dark CSP, transfers initialization through a `MessageChannel`, rejects stale identity/sequence messages, throttles diagnostics, and removes ports/iframe state on disposal. It is additive: current Play and fullscreen Preview do not mount it yet.
 
-The scripting package defines a Studio SDK, bounded virtual file system, worker-based `esbuild-wasm` compilation, diagnostic/source-map/content-hash results, and an opaque sandbox protocol. Behavior code is intended to use lifecycle hooks such as `onStart`, `onFixedUpdate`, `onUpdate`, actions/events/collisions, and `onDestroy` through stable serializable handles.
+The scripting package defines a Studio SDK, bounded virtual file system, worker-based `esbuild-wasm` compilation, diagnostic/source-map/content-hash results, and an opaque sandbox protocol. Behavior code runs `onStart`, `onFixedUpdate`, `onUpdate`, and `onDestroy` through stable serializable handles; action/event/collision delivery awaits the shared runtime command/event bridge.
 
-Monaco source persistence, SDK-aware semantic analysis/autocomplete, and build-time compilation are integrated. The editor, compiler, and bundled templates share the `@threejs-studio/sdk` module and `ctx.api.*` context shape. The v1 runtime adapter reads behavior-binding properties such as movement speed, but it does **not** load or execute the authored source or compiled bundle. Runtime script execution, component attachment, last-known-good hot reload in Play, watchdog termination, source-linked logs, and debugger features are not integrated.
+Monaco source persistence, SDK-aware semantic analysis/autocomplete, and build-time compilation are integrated. The editor, compiler, and bundled templates share the `@threejs-studio/sdk` module and `ctx.api.*` context shape. Editor Play and export execute the exact compiled default behavior in a network-dark opaque iframe/Worker, validate its revision/content hash, mirror lifecycle commands, bound retained SDK commands, and clean up the host. SDK command application, general component attachment, last-known-good hot reload, watchdog termination, source-linked logs, and debugger features are not integrated.
 
 Remote URLs, `file:` imports, dynamic remote imports, and undeclared npm packages remain disallowed. Executable-code changes and new permissions require visible approval.
 
@@ -188,7 +188,7 @@ The primary editor Build command now calls `buildOfflineZip` with:
 
 - A production runtime projection of the authoritative v5 `project.json`; authoring-only TypeScript source catalogs are removed.
 - Self-contained, version-locked local Three.js and `@dimforge/rapier3d-compat` modules.
-- Compiled project scripts when source assets exist, stored as hashed, non-JavaScript artifacts. Bootstrap does not import or expose them to the main-realm runtime while the opaque behavior sandbox is pending.
+- Compiled project scripts when source assets exist, stored as hashed non-JavaScript artifacts and embedded into a dedicated opaque behavior document. Bootstrap starts that document/Worker before the main runtime and never evaluates authored code in the main realm.
 - Available referenced model source bytes.
 - A local CSP-safe HUD stylesheet.
 - No production source maps, a network-dark CSP (`connect-src 'none'`), normalized paths, sorted deterministic entries, and SHA-256 hashes.
@@ -197,7 +197,7 @@ The resulting production ZIP declares no network dependencies and contains no CD
 
 The packaged runtime validates/normalizes v4/v5 projects, selects the startup scene, renders primitives/lights/cameras, and runs a fixed scheduler. When it finds `runtime-bindings.v1`, it initializes local Rapier, a character controller, collision/sensor handling, keyboard/gamepad input, accessible hold-style touch controls, score/countdown, locked/unlocked exit, win/fail/restart, diagnostics, and cleanup. The targeted offline suite exercises keyboard win, gamepad movement, timeout, restart, HUD, and disposal.
 
-This remains a specialized adapter rather than Play/export parity. It implements the template rules separately from `ProjectGameRuntime`, does not execute the packaged compiled behavior bundle, uses a purpose-built HUD instead of the generic runtime-UI renderer, and does not load packaged GLB/glTF model bytes. Deterministic packaging and a runnable Collect slice therefore do not yet prove the general shared runtime.
+This remains a specialized adapter rather than Play/export parity. It executes the packaged compiled behavior lifecycle but does not apply its SDK commands; template rules still live separately from `ProjectGameRuntime`, the build uses a purpose-built HUD instead of the generic runtime-UI renderer, and packaged GLB/glTF model bytes are not loaded. Deterministic packaging and a runnable Collect slice therefore do not yet prove the general shared runtime.
 
 Production acceptance requires serving the ZIP from a non-root path with networking disabled and completing the same game checkpoints as Play.
 
@@ -221,9 +221,9 @@ The bundled template is a deterministic valid v5 project containing:
 - An accessible responsive HUD/runtime-UI document and touch controls.
 - A default-deny offline production build profile.
 
-The editor can create, persist, reopen, inspect scripts/settings, play, stop, and package this project. Editor Play executes the v1 manifest through shared input/physics/state/runtime-UI modules; offline output executes an equivalent Rapier/input/state/HUD adapter. Both cover movement, pickups, score/countdown, the exit, win/fail/restart, and cleanup.
+The editor can create, persist, reopen, inspect scripts/settings, play, stop, and package this project. Editor Play executes the authored lifecycle plus the v1 manifest through shared input/physics/state/runtime-UI modules; offline output executes the same behavior bytes plus an equivalent Rapier/input/state/HUD adapter. Both cover movement, pickups, score/countdown, the exit, win/fail/restart, and cleanup.
 
-The authored TypeScript source is still descriptive rather than executable in both adapters. Because the editor and offline adapters are separate implementations and Play is not in the opaque host, this is a runnable vertical slice—not the final shared-runtime proof.
+The authored TypeScript source is executable in both paths but is not yet authoritative: its SDK commands do not drive the visible adapters. Because editor and offline gameplay remain separate implementations and visible Play is not inside the opaque host, this is a runnable vertical slice—not the final shared-runtime proof.
 
 Acceptance still requires deterministic checkpoints for initial state, pickup collection, locked/unlocked exit, win, timeout failure, restart, Pause/Step, Stop restoration, reopen, and offline export. Keyboard, touch, and gamepad routes must reach equivalent gameplay checkpoints.
 

@@ -6,7 +6,7 @@ Canonical website: [threejs.studio](https://threejs.studio) · Repository: [chri
 
 ## Implementation status
 
-This branch makes schema v5 the durable project format, adds the first game-authoring surfaces, and makes the bundled Collect & Escape project playable in editor Play and the offline ZIP through a versioned runtime-binding adapter. It is not yet the final shared, script-driven, opaque-origin runtime; that boundary is called out explicitly below.
+This branch makes schema v5 the durable project format, adds the first game-authoring surfaces, and makes the bundled Collect & Escape project playable in editor Play and the offline ZIP through a versioned runtime-binding adapter. Authored TypeScript now compiles and executes in an opaque behavior Worker in both paths, but it does not yet replace the specialized adapters that own visible gameplay; that boundary is called out explicitly below.
 
 ### Integrated in the editor
 
@@ -17,18 +17,18 @@ This branch makes schema v5 the durable project format, adds the first game-auth
 - A Game Authoring workspace with Scripts, Input, Game UI, and Build tabs. Monaco is loaded lazily; saving executable source requires an explicit review dialog and enters the normal validated, autosaved, one-step Undo path.
 - A typed schema-v5 game capability manifest for script list/read/upsert/delete, Collect & Escape creation, build-profile reads, and offline-build preparation. The existing schema-v4 tool/host layer remains as a compatibility surface.
 - Play/Pause/Step/Stop use the shared fixed-60-Hz `RuntimeSession`. Projects carrying `threejs-studio.runtime-bindings.v1` run through `ProjectGameRuntime`: generalized keyboard/pointer/touch/gamepad input, Rapier-backed physics, pickups, score/countdown, exit win/fail/restart, and the framework-free accessible runtime HUD. Projects without that manifest retain Rotate, Float, and Keyboard Move compatibility. Stop disposes runtime state and restores the authored scene.
-- The primary Build command emits an offline ZIP containing a production runtime projection of the validated v5 project, local version-locked Three.js and Rapier modules, inert compiled-script artifacts when present, available model bytes, hashes, a network-dark CSP, and a CSP-safe HUD stylesheet. Raw TypeScript and source maps are omitted from production; the old single-file HTML exporter remains available as a legacy option.
+- The primary Build command emits an offline ZIP containing a production runtime projection of the validated v5 project, local version-locked Three.js and Rapier modules, available model bytes, hashes, a network-dark CSP, and a CSP-safe HUD stylesheet. When scripts exist, the exact hash-checked compiled module executes inside a packaged opaque iframe/Worker before the main runtime boots; raw TypeScript and source maps are omitted from production, and the old single-file HTML exporter remains available as a legacy option.
 - The offline `runtime-bindings.v1` adapter runs Collect & Escape at fixed 60 Hz with Rapier character collision, keyboard/gamepad movement, accessible hold-style touch controls, sensor pickups/exit, score/countdown, win/fail/restart, diagnostics, and runtime/DOM/GPU cleanup.
 - Chromium and mobile WebKit coverage for the migrated menus/dialogs/typing surfaces, including axe checks with no serious or critical findings in the tested core and overlay states.
 
 ### Implemented foundations not yet end-to-end
 
 - Component, input, physics, event/state, runtime-UI, compiler/sandbox, secure preview-host, workspace-layout, and offline-runtime modules have focused contract/browser tests.
-- `RuntimePreviewHost` mounts an opaque-origin, network-dark iframe and validates identity, sequencing, lifecycle commands, diagnostics, and cleanup. The current Play and Preview buttons do not use this host yet.
-- Editor Play and export currently use separate manifest-driven adapters. Both implement Collect & Escape's rules, but neither executes the authored TypeScript behavior source. Compiled output is packaged with a non-executable extension and MIME type for the future opaque behavior sandbox, and bootstrap never imports or hands it to the runtime. The offline adapter uses a purpose-built accessible HUD after validating the runtime-UI asset, while editor Play mounts the generic runtime-UI renderer.
+- `RuntimePreviewHost` mounts an opaque-origin, network-dark iframe and validates identity, sequencing, lifecycle commands, diagnostics, and cleanup. Play now mounts a hidden instance for the compiled behavior and mirrors Start/Pause/Step/Resume/Restart/Stop into it; the visible Three.js runtime still runs in `ViewportEngine`.
+- Editor Play and export still use separate manifest-driven gameplay adapters. Both now execute the same compiled behavior bytes in the opaque behavior host, but emitted SDK commands and variables are diagnostic telemetry only and do not yet drive transforms, physics, collisions, runtime UI, audio, or scene transitions. The offline adapter uses a purpose-built accessible HUD after validating the runtime-UI asset, while editor Play mounts the generic runtime-UI renderer.
 - The adapters are specialized to the v1 Collect-style tag/rule contract rather than arbitrary scripts or visual graphs. Editor character motion uses the current axis-aligned collision adapter, and current Play remains inside `ViewportEngine` rather than the opaque preview host.
 - The offline renderer still does not decode packaged GLB/glTF model binaries. Generalized asset loading, arbitrary behavior execution, and exact Play/export runtime parity remain open.
-- Collect & Escape is a deterministic, valid v5 template and a runnable vertical slice. It is not yet the complete product proof because the public TypeScript behavior does not drive execution and the two runtime hosts have not converged.
+- Collect & Escape is a deterministic, valid v5 template and a runnable vertical slice. It is not yet the complete product proof because the public TypeScript behavior runs but does not drive the visible game, and the two gameplay hosts have not converged.
 - Prefab records and multiple scenes are preserved and validated, but full prefab, scene-transition, and multi-scene editing workflows are not implemented.
 
 ## Run locally
@@ -112,7 +112,7 @@ Human editor · Guided Assistant · typed integrations
                editor Play  offline ZIP
 ```
 
-The target is one command path and one sandboxed runtime path. Today, v5 is authoritative, while the legacy scene projection, Play host, and restricted offline renderer remain convergence work.
+The target is one command path and one sandboxed runtime path. Today, v5 is authoritative and compiled behavior lifecycle execution is shared, while SDK command application, the legacy scene projection, the visible Play host, and the restricted offline renderer remain convergence work.
 
 Important areas:
 
@@ -141,6 +141,6 @@ The same-page bridge is a trusted integration seam, not an authenticated MCP ser
 
 ## First complete-game proof
 
-The acceptance game is **Collect & Escape**: move through a compact arena, collect every shard before the countdown expires, then reach the exit. The versioned adapters now prove the core loop in editor Play and offline output. The release gate remains the complete author → script-driven sandboxed Play → stop → reopen → same-runtime export → complete-offline journey with keyboard, touch, and gamepad.
+The acceptance game is **Collect & Escape**: move through a compact arena, collect every shard before the countdown expires, then reach the exit. The versioned adapters now prove the core loop in editor Play and offline output, and both execute the authored lifecycle in isolation. The release gate remains the complete author → script-driven visible Play → stop → reopen → same-runtime export → complete-offline journey with keyboard, touch, and gamepad.
 
 See [Product Plan](docs/PRODUCT_PLAN.md) for delivery gates and [Game Authoring Architecture](docs/GAME_AUTHORING_ARCHITECTURE.md) for the implementation boundary.

@@ -1,4 +1,19 @@
 import { zip, type AsyncZippable, type ZipOptions } from 'fflate';
+import {
+  RUNTIME_PREVIEW_ALLOW,
+  RUNTIME_PREVIEW_SANDBOX,
+  RUNTIME_PREVIEW_TRANSPORT,
+  RUNTIME_PREVIEW_TRANSPORT_VERSION,
+  createRuntimePreviewDocument,
+} from '../runtime/RuntimePreviewHost';
+import {
+  createAuthoredBehaviorPreviewSource,
+  createBehaviorPreviewSnapshot,
+} from '../runtime/behaviorPreviewRuntime';
+import {
+  RUNTIME_IFRAME_PROTOCOL,
+  RUNTIME_IFRAME_PROTOCOL_VERSION,
+} from '../runtime/protocol';
 import { sha256Hex } from './hash';
 import { normalizeBuildFilename, normalizeBuildPath } from './paths';
 import {
@@ -22,7 +37,7 @@ export const OFFLINE_BUILD_CSP = [
   "connect-src 'none'",
   "font-src 'self' data:",
   "form-action 'none'",
-  "frame-src 'none'",
+  "frame-src 'self'",
   "img-src 'self' blob: data:",
   "manifest-src 'self'",
   "media-src 'self' blob: data:",
@@ -149,6 +164,24 @@ function prepareBundle(bundle: BuildBundleInput, namespace: 'runtime' | 'scripts
  */
 function prepareScriptArtifacts(bundle: BuildBundleInput, profile: BuildProfileMetadata['id']) {
   const prepared = prepareBundle(bundle, 'scripts', 'script');
+  const entryFile = prepared.files.find((file) => file.path === prepared.entry);
+  if (!entryFile) throw new BuildValidationError('Authored behavior entry is missing.');
+  let moduleCode: string;
+  try {
+    moduleCode = TEXT_DECODER.decode(entryFile.bytes);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new BuildValidationError(`Authored behavior entry must be valid UTF-8 JavaScript: ${reason}`);
+  }
+  if (bundle.contentHash !== undefined && !/^[a-f0-9]{64}$/iu.test(bundle.contentHash)) {
+    throw new BuildValidationError('Authored behavior contentHash must be a SHA-256 hex digest.');
+  }
+  if (
+    bundle.projectRevision !== undefined
+    && (!Number.isSafeInteger(bundle.projectRevision) || bundle.projectRevision < 0)
+  ) {
+    throw new BuildValidationError('Authored behavior projectRevision must be a non-negative safe integer.');
+  }
   const files = prepared.files
     .filter((file) => profile !== 'production' || !/\.map$/iu.test(file.path))
     .map((file): PreparedFile => ({
@@ -159,6 +192,9 @@ function prepareScriptArtifacts(bundle: BuildBundleInput, profile: BuildProfileM
   return {
     entry: `${prepared.entry}${SCRIPT_ARTIFACT_SUFFIX}`,
     files,
+    moduleCode,
+    expectedContentHash: bundle.contentHash ?? null,
+    projectRevision: bundle.projectRevision ?? 0,
   };
 }
 
@@ -261,6 +297,9 @@ function createBootstrapModule(
   profile: BuildProfileMetadata['id'],
   runtimeEntry: string,
   projectManifest: Record<string, unknown>,
+  behaviorPreview: {
+    identity: { sessionId: string; revision: number; buildHash: string };
+  } | null,
 ): string {
   const serializedContext = JSON.stringify({
     profile,
@@ -268,8 +307,10 @@ function createBootstrapModule(
     runtimeEntryUrl: `./${runtimeEntry}`,
   });
   const serializedProject = JSON.stringify(JSON.stringify(projectManifest));
+  const serializedBehaviorPreview = JSON.stringify(behaviorPreview);
   return `const paths = ${serializedContext};
 const projectManifest = JSON.parse(${serializedProject});
+const behaviorPreview = ${serializedBehaviorPreview};
 const build = Object.freeze({
   profile: paths.profile,
   assetBaseUrl: new URL(paths.assetBaseUrl, import.meta.url).href,
@@ -283,7 +324,118 @@ Object.defineProperty(globalThis, '__THREEJS_STUDIO_BUILD__', {
   writable: false,
 });
 
+async function mountAuthoredBehavior() {
+  if (!behaviorPreview) return null;
+  const iframe = document.createElement('iframe');
+  iframe.title = 'Authored behavior runtime';
+  iframe.name = 'offline-authored-behavior';
+  iframe.hidden = true;
+  iframe.setAttribute('sandbox', ${JSON.stringify(RUNTIME_PREVIEW_SANDBOX)});
+  iframe.setAttribute('allow', ${JSON.stringify(RUNTIME_PREVIEW_ALLOW)});
+  iframe.setAttribute('referrerpolicy', 'no-referrer');
+  iframe.setAttribute('data-threejs-studio-runtime-preview', '');
+  iframe.src = new URL('./authored-behavior.html', import.meta.url).href;
+  const loaded = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Authored behavior frame timed out.')), 5000);
+    iframe.addEventListener('load', () => {
+      clearTimeout(timeout);
+      resolve();
+    }, { once: true });
+    iframe.addEventListener('error', () => {
+      clearTimeout(timeout);
+      reject(new Error('Authored behavior frame failed to load.'));
+    }, { once: true });
+  });
+  document.body.append(iframe);
+  await loaded;
+
+  const channel = new MessageChannel();
+  let inboundSequence = 1;
+  let outboundSequence = 1;
+  let requestSequence = 0;
+  const pending = new Map();
+  const ready = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Authored behavior handshake timed out.')), 5000);
+    channel.port1.addEventListener('message', (event) => {
+      const envelope = event.data;
+      if (!envelope || envelope.sequence !== inboundSequence || envelope.sessionId !== behaviorPreview.identity.sessionId
+        || envelope.revision !== behaviorPreview.identity.revision || envelope.buildHash !== behaviorPreview.identity.buildHash) return;
+      inboundSequence += 1;
+      const message = envelope.message;
+      if (message?.type === 'runtime.ready') {
+        clearTimeout(timeout);
+        resolve(message.diagnostics);
+        return;
+      }
+      if (message?.type === 'runtime.result' && typeof message.requestId === 'string') {
+        const request = pending.get(message.requestId);
+        if (!request) return;
+        pending.delete(message.requestId);
+        request.resolve(message.diagnostics);
+        return;
+      }
+      if (message?.type === 'runtime.error') {
+        const error = new Error(message.message || 'Authored behavior runtime failed.');
+        if (typeof message.requestId === 'string') {
+          const request = pending.get(message.requestId);
+          pending.delete(message.requestId);
+          request?.reject(error);
+        }
+        if (message.fatal) {
+          clearTimeout(timeout);
+          reject(error);
+        }
+      }
+    });
+    channel.port1.start();
+  });
+  iframe.contentWindow.postMessage({
+    transport: ${JSON.stringify(RUNTIME_PREVIEW_TRANSPORT)},
+    transportVersion: ${RUNTIME_PREVIEW_TRANSPORT_VERSION},
+    type: 'runtime.handshake',
+    handshakeId: 'offline-authored-behavior',
+    ...behaviorPreview.identity,
+  }, '*', [channel.port2]);
+  await ready;
+
+  const command = (action) => {
+    const requestId = 'offline-behavior-' + (++requestSequence);
+    const message = {
+      protocol: ${JSON.stringify(RUNTIME_IFRAME_PROTOCOL)},
+      protocolVersion: ${RUNTIME_IFRAME_PROTOCOL_VERSION},
+      ...behaviorPreview.identity,
+      type: 'runtime.command',
+      requestId,
+      action,
+    };
+    const result = new Promise((resolve, reject) => pending.set(requestId, { resolve, reject }));
+    channel.port1.postMessage({
+      transport: ${JSON.stringify(RUNTIME_PREVIEW_TRANSPORT)},
+      transportVersion: ${RUNTIME_PREVIEW_TRANSPORT_VERSION},
+      sequence: outboundSequence++,
+      ...behaviorPreview.identity,
+      message,
+    });
+    return result;
+  };
+  const diagnostics = await command('start');
+  const controller = { iframe, diagnostics, command };
+  Object.defineProperty(globalThis, '__THREEJS_STUDIO_AUTHORED_BEHAVIOR__', {
+    value: controller,
+    enumerable: false,
+    configurable: true,
+  });
+  addEventListener('pagehide', () => {
+    void command('dispose').catch(() => undefined);
+    channel.port1.close();
+    iframe.remove();
+    delete globalThis.__THREEJS_STUDIO_AUTHORED_BEHAVIOR__;
+  }, { once: true });
+  return controller;
+}
+
 try {
+  await mountAuthoredBehavior();
   const runtimeModule = await import(build.runtimeEntryUrl);
   const boot = runtimeModule.boot ?? runtimeModule.default;
   if (typeof boot !== 'function') {
@@ -371,6 +523,28 @@ export async function buildOfflineZip(request: BuildRequest): Promise<BuildResul
   const runtime = prepareBundle(request.runtime, 'runtime', 'runtime');
   const scripts = request.scripts ? prepareScriptArtifacts(request.scripts, request.profile) : null;
   const preparedProject = prepareRuntimeProject(request.project, request.profile);
+  let behaviorPreview: {
+    identity: { sessionId: string; revision: number; buildHash: string };
+  } | null = null;
+  let behaviorPreviewDocument: string | null = null;
+  if (scripts) {
+    const contentHash = await sha256Hex(TEXT_ENCODER.encode(scripts.moduleCode));
+    if (scripts.expectedContentHash && scripts.expectedContentHash.toLowerCase() !== contentHash) {
+      throw new BuildValidationError('Authored behavior bytes do not match their compiled contentHash.');
+    }
+    const identity = {
+      sessionId: 'offline-authored-behavior',
+      revision: scripts.projectRevision,
+      buildHash: contentHash,
+    };
+    const runtimeSource = createAuthoredBehaviorPreviewSource({
+      moduleCode: scripts.moduleCode,
+      contentHash,
+      projectRevision: scripts.projectRevision,
+    }, createBehaviorPreviewSnapshot(preparedProject.manifest));
+    behaviorPreview = { identity };
+    behaviorPreviewDocument = createRuntimePreviewDocument(runtimeSource);
+  }
   const project = preparedProject.file;
   const assets = (request.assets ?? []).map((asset) => prepareInput(asset, 'assets', 'asset'));
   const title = request.title?.trim() || request.projectName.trim();
@@ -380,9 +554,12 @@ export async function buildOfflineZip(request: BuildRequest): Promise<BuildResul
 
   const generated = [
     generatedFile('index.html', createIndexHtml(title), 'text/html; charset=utf-8'),
+    ...(behaviorPreviewDocument
+      ? [generatedFile('authored-behavior.html', behaviorPreviewDocument, 'text/html; charset=utf-8')]
+      : []),
     generatedFile(
       'bootstrap.js',
-      createBootstrapModule(request.profile, runtime.entry, preparedProject.manifest),
+      createBootstrapModule(request.profile, runtime.entry, preparedProject.manifest, behaviorPreview),
       'text/javascript; charset=utf-8',
     ),
     generatedFile('styles.css', DEFAULT_STYLES, 'text/css; charset=utf-8'),
@@ -428,7 +605,7 @@ export async function buildOfflineZip(request: BuildRequest): Promise<BuildResul
     contentSecurityPolicy: OFFLINE_BUILD_CSP,
     security: {
       networkPolicy: 'deny',
-      authoredScriptExecution: 'disabled-pending-opaque-sandbox',
+      authoredScriptExecution: scripts ? 'opaque-sandbox' : 'disabled-pending-opaque-sandbox',
       projectAuthoringSource: request.profile === 'production' ? 'omitted' : 'included',
     },
     hashAlgorithm: 'SHA-256',

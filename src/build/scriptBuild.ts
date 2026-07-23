@@ -8,6 +8,7 @@ export interface CompiledProjectScripts {
   bundle: BuildBundleInput | null;
   diagnostics: string[];
   contentHash: string | null;
+  moduleCode: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -34,7 +35,12 @@ export async function compileProjectScriptsForBuild(
 ): Promise<CompiledProjectScripts> {
   const sources = getProjectScriptSources(project);
   const entries = Object.entries(sources);
-  if (!entries.length) return { bundle: null, diagnostics: [], contentHash: null };
+  if (!entries.length) return {
+    bundle: null,
+    diagnostics: [],
+    contentHash: null,
+    moduleCode: null,
+  };
 
   const declaredEntry = project.assets.find((asset) => asset.kind === 'script')?.entryPoint;
   const entryPath = declaredEntry && sources[declaredEntry]
@@ -57,7 +63,12 @@ export async function compileProjectScriptsForBuild(
       : '';
     return `${location}${diagnostic.code} ${diagnostic.message}`;
   });
-  if (!result.ok) return { bundle: null, diagnostics, contentHash: null };
+  if (!result.ok) return {
+    bundle: null,
+    diagnostics,
+    contentHash: null,
+    moduleCode: null,
+  };
 
   const files = [{
     path: 'behaviors.js',
@@ -74,8 +85,14 @@ export async function compileProjectScriptsForBuild(
     });
   }
   return {
-    bundle: { entry: 'behaviors.js', files },
+    bundle: {
+      entry: 'behaviors.js',
+      files,
+      contentHash: result.contentHash,
+      projectRevision: revision,
+    },
     diagnostics,
     contentHash: result.contentHash,
+    moduleCode: result.javascript,
   };
 }
